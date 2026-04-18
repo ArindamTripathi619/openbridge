@@ -326,36 +326,24 @@ Update PID in config before starting
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────┐
-│         Configuration (YAML)            │
-└────────────────┬────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────┐
-│         Monitor Manager                 │
-└─┬───────────┬──────────────┬────────────┘
-  │           │              │
-  ▼           ▼              ▼
-┌──────┐  ┌──────┐      ┌──────────┐
-│File  │  │ PID  │      │ Journal  │
-│Watch │  │Track │      │ Reader   │
-└──┬───┘  └──┬───┘      └────┬─────┘
-   │         │                │
-   └────────┬┴────────────────┘
-            ▼
-    ┌───────────────┐
-    │ Event Queue   │
-    └───────┬───────┘
-            ▼
-    ┌───────────────┐
-    │ LLM Analyzer  │
-    └───────┬───────┘
-            ▼
-    ┌───────────────┐
-    │   Telegram    │
-    │   Notifier    │
-    └───────────────┘
+```mermaid
+flowchart TD
+
+    A[Configuration (YAML)]
+    B[Monitor Manager]
+
+    A --> B
+
+    B --> C1[File Watch]
+    B --> C2[PID Track]
+    B --> C3[Journal Reader]
+
+    C1 --> D[Event Queue]
+    C2 --> D
+    C3 --> D
+
+    D --> E[LLM Analyzer]
+    E --> F[Telegram Notifier]
 ```
 
 ## Contributing
