@@ -1,6 +1,6 @@
 # TeleWatch Onboarding Guide 🚀
 
-Welcome to **TeleWatch** (also known as `bot-monitor`), your intelligent companion for remote process monitoring. This tool doesn't just "tail logs"—it understands them, tracks progress, and alerts you intelligently via Telegram.
+Welcome to **TeleWatch** (also known as `telewatch`), your intelligent companion for remote process monitoring. This tool doesn't just "tail logs"—it understands them, tracks progress, and alerts you intelligently via Telegram.
 
 ---
 
@@ -28,7 +28,7 @@ Before you start, ensure you have:
     *   **Groq** (Fastest, Free Tier available) - *Recommended*
     *  - **Option 1-3**: Cloud providers (OpenAI, Anthropic, Groq). Requires an API Key.
 - **Option 4**: Ollama (Local). 100% private, runs on your hardware.
-- **Option 5**: Local API Rotator. Points to a LiteLLM proxy (standard on this laptop).
+- **Option 5**: Local API Rotator. Points to a LiteLLM proxy with 50+ models across 5 providers (Groq, Mistral, etc.).
 
 ---
 
@@ -68,7 +68,7 @@ chmod +x telewatch
 The fastest way to configure TeleWatch is using the interactive setup wizard. It validates your keys in real-time.
 
 ```bash
-bot-monitor setup
+telewatch setup
 ```
 
 **What the Wizard does:**
@@ -85,23 +85,23 @@ bot-monitor setup
 Start monitoring interactively. You will see a live dashboard in your terminal.
 
 ```bash
-bot-monitor start
+telewatch start
 ```
 
 ### Daemon Mode (Background)
 Run TeleWatch in the background. It will detach from your terminal and keep running even if you logout.
 
 ```bash
-bot-monitor start --daemon
+telewatch start --daemon
 ```
 *   **Logs**: Output is redirected to `~/.telewatch/telewatch.log`
-*   **Control**: Use `bot-monitor status` or `bot-monitor stop` to manage it.
+*   **Control**: Use `telewatch status` or `telewatch stop` to manage it.
 
 ### Turbo Mode (High Performance) ⚡
 For ultra-lean deployments (e.g., Raspberry Pi, small VPS) where you only need basic monitoring without heavy analysis.
 
 ```bash
-bot-monitor start --turbo
+telewatch start --turbo
 ```
 *   **Disables**: Log Profiler (No structural learning), Anomaly Detector (No spike/stall checks).
 *   **Enables**: Basic pattern matching, keyword alerts, progress tracking.
@@ -121,7 +121,7 @@ bot-monitor start --turbo
 
 ## 📖 6. Command Reference
 
-All commands are prefixed with `bot-monitor`.
+All commands are prefixed with `telewatch`.
 
 | Command | Description | Key Options |
 | :--- | :--- | :--- |
@@ -134,7 +134,7 @@ All commands are prefixed with `bot-monitor`.
 **Example:**
 ```bash
 # Start in background with custom config
-bot-monitor start --daemon --config ./my_config.yaml
+telewatch start --daemon --config ./my_config.yaml
 ```
 
 ---
@@ -185,7 +185,7 @@ TeleWatch will notify you as each stage begins!
 ## ❓ 8. Troubleshooting
 
 **Q: "Config not found!"**
-A: Run `bot-monitor setup` or specify a file with `--config path/to/config.yaml`.
+A: Run `telewatch setup` or specify a file with `--config path/to/config.yaml`.
 
 **Q: Telegram commands aren't working.**
 A: Ensure your bot has `Privacy Mode` **disabled** in @BotFather so it can read your messages, or strictly address it in a group. In 1-on-1 chats, it should work by default.

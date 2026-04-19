@@ -26,7 +26,7 @@ FROM python:3.11-alpine
 WORKDIR /app
 
 # Create non-root user
-RUN adduser -D botmonitor
+RUN adduser -D telewatch
 
 # Copy installed dependencies
 COPY --from=builder /install /usr/local/lib/python3.11/site-packages
@@ -40,7 +40,7 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Switch to non-root user
-USER botmonitor
+USER telewatch
 
 # Default command
-CMD ["python", "-m", "bot_monitor.cli", "run"]
+CMD ["python", "-m", "telewatch.cli", "run"]

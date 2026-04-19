@@ -1,4 +1,4 @@
-"""Main CLI interface for bot-monitor."""
+"""Main CLI interface for telewatch."""
 
 import argparse
 import sys
@@ -7,10 +7,11 @@ import signal
 import os
 from pathlib import Path
 from typing import Optional, List
+from datetime import datetime
 
 from .config import Config, ConfigError, create_example_config
 from .monitors import FileMonitor, PIDMonitor, JournalMonitor, BaseMonitor
-from .analyzers import create_llm_client, EventAnalyzer
+from .analyzers import create_llm_client, EventAnalyzer, ROTATOR_PRESETS
 from .notifiers import TelegramNotifier
 from .core.logging import get_logger
 
@@ -30,6 +31,7 @@ class MonitorManager:
         self.monitors: List[BaseMonitor] = []
         self.running = False
         self.paused = False  # New paused state
+        self.process_completed = False  # Track if we detected completion
         
         # Initialize LLM and notifier
         llm_config = config.get_llm_config()
@@ -180,8 +182,11 @@ class MonitorManager:
     def _event_loop(self):
         """Main event processing loop."""
         import time
+        import psutil
         last_progress_check = time.time()
+        last_process_check = time.time()
         progress_check_interval = 2  # Check progress every 2 seconds
+        process_check_interval = 10  # Check process alive status every 10s
         
         # Initial UI update
         if self.ui_callback:
@@ -207,8 +212,17 @@ class MonitorManager:
                         if self.progress_tracker and hasattr(event, 'content'):
                             self.progress_tracker.add_log_line(event.content)
                         
+                        # Check for completion flags
+                        if getattr(event, 'metadata', {}).get("is_completion") and not self.process_completed:
+                            self._handle_process_completion()
+                            continue
+                        
+                        # Process terminated event from PIDMonitor
+                        if hasattr(event, 'content') and "has terminated" in str(event.content) and not self.process_completed:
+                            self._handle_process_completion()
+                        
                         # Analyze event (skip if it's just a progress update)
-                        if event.metadata.get("is_progress"):
+                        if getattr(event, 'metadata', {}).get("is_progress"):
                             continue
                             
                         analysis = self.analyzer.analyze_event(event)
@@ -256,13 +270,42 @@ class MonitorManager:
                 
                 except Exception as e:
                     logger.error(f"Periodic check error: {e}")
+                    
+            # Structural check if process is still alive
+            if (current_time - last_process_check) >= process_check_interval:
+                last_process_check = current_time
+                if self.progress_tracker and self.progress_tracker.process_name and not self.process_completed:
+                    try:
+                        target = self.progress_tracker.process_name.lower()
+                        is_running = False
+                        
+                        for p in psutil.process_iter(['name', 'cmdline']):
+                            try:
+                                cmd = " ".join(p.info.get('cmdline') or [])
+                                name = p.info.get('name') or ""
+                                if target in name.lower() or target in cmd.lower():
+                                    # Ignore our own tools
+                                    if "telewatch" not in cmd and "tail" not in cmd and "nano" not in cmd and "vi" not in cmd:
+                                        is_running = True
+                                        break
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                                
+                        # If we have tracked some progress (i.e. it 'started' successfully) but now it's gone
+                        if not is_running and self.progress_tracker.current_percentage > 0:
+                            logger.info(f"Target process '{target}' is no longer running in psutil.")
+                            self._handle_process_completion()
+                    except Exception as e:
+                        logger.debug(f"Process check error: {e}")
             
             # Poll for user messages
             if self.message_listener:
                 try:
                     self.message_listener.poll_once()
                 except Exception as e:
-                    print(f"Message polling error: {e}")
+                    logger.error(f"Message polling error: {e}")
+                    # Error backoff to prevent API spam and conflict loops
+                    time.sleep(2)
             
             # Frequent UI update (every loop ~1s)
             if self.ui_callback:
@@ -332,8 +375,12 @@ class MonitorManager:
             logger.info("Monitoring state changed to RUNNING")
         elif cmd == "logs":
             self._send_recent_logs()
+        elif cmd == "stop":
+            self.notifier.send_message("🛑 <b>TeleWatch stopped remotely.</b>\nMonitoring has been terminated.")
+            logger.info("Remote /stop command received – shutting down")
+            self.stop()
         else:
-            self.notifier.send_message(f"❓ **Unknown command:** /{cmd}\nAvailable: /status, /pause, /resume, /logs")
+            self.notifier.send_message(f"❓ **Unknown command:** /{cmd}\nAvailable: /status, /pause, /resume, /logs, /stop")
 
     def _send_status_report(self):
         """Generate and send full status report."""
@@ -358,8 +405,45 @@ class MonitorManager:
         logs = "\n".join(self.progress_tracker.recent_logs[-15:])
         self.notifier.send_message(f"📋 **Recent Logs:**\n```\n{logs}\n```")
 
+    def _handle_process_completion(self):
+        """Handle detected process completion. Send final summary with LLM stats."""
+        self.process_completed = True
+        logger.info("Process completion detected in logs!")
+        
+        lines = ["🎉 <b>Process Completed Successfully!</b>", ""]
+        
+        # Include progress info if available
+        if self.progress_tracker:
+            duration = (datetime.now() - self.progress_tracker.start_time).total_seconds()
+            mins, secs = divmod(int(duration), 60)
+            lines.append(f"⏱️ <b>Duration:</b> {mins}m {secs}s")
+            lines.append(f"📈 <b>Final Progress:</b> {self.progress_tracker.current_percentage:.1f}%")
+            
+            # Record in history
+            self.history_manager.record_run(
+                self.progress_tracker.process_name,
+                self.progress_tracker.start_time,
+                duration,
+                "completed"
+            )
+        
+        # Include LLM analysis summary
+        if self.token_tracker:
+            stats = self.token_tracker.get_stats("current")
+            lines.append("")
+            lines.append("📊 <b>LLM Analysis Summary:</b>")
+            lines.append(f"  • Total Requests: {stats['total_requests']}")
+            lines.append(f"  • LLM Calls: {stats['llm_calls']}")
+            lines.append(f"  • Cache Hits: {stats['cached_calls']} ({stats['cache_hit_rate']}%)")
+            lines.append(f"  • Pattern Matches: {stats['pattern_matched']} ({stats['pattern_match_rate']}%)")
+            lines.append(f"  • Tokens Used: {stats['total_tokens']:,}")
+        
+        message = "\n".join(lines)
+        self.notifier.send_message(message)
+        print("🎉 Process completed! Final summary sent.")
+
     def stop(self):
-        """Stop all monitors."""
+        """Stop all monitors and Telegram polling."""
         self.running = False
         
         logger.info("Stopping monitors...")
@@ -368,11 +452,19 @@ class MonitorManager:
                 monitor.stop()
             except Exception as e:
                 logger.error(f"Error stopping {monitor.name}: {e}")
+        
+        # Stop Telegram listener polling
+        if self.message_listener:
+            try:
+                self.message_listener.stop_polling()
+                logger.info("Telegram listener stopped")
+            except Exception as e:
+                logger.debug(f"Listener stop: {e}")
 
 
 def cmd_setup(args):
     """Interactive setup wizard."""
-    print("🤖 Bot Monitor Setup Wizard")
+    print("🤖 TeleWatch Setup Wizard")
     print("=" * 40)
     print()
     
@@ -381,7 +473,7 @@ def cmd_setup(args):
         "llm": {},
         "notification": {
             "debounce_seconds": 300,
-            "rate_limit_per_hour": 10,
+            "rate_limit_per_hour": 50,
             "severity_levels": ["critical", "warning", "info"]
         },
         "monitors": []
@@ -505,20 +597,33 @@ def cmd_setup(args):
         base_url = input("Enter Local Rotator URL [http://localhost:8000/v1]: ").strip() or "http://localhost:8000/v1"
         config_data["llm"]["base_url"] = base_url
         
-        print("\nSelect Rotator Model:")
-        print("  1) groq-llama (Fast coding/chat)")
-        print("  2) gemini-flash (Long context/vision)")
-        print("  3) Custom model name")
-        rot_choice = input("Choice [1-3]: ").strip()
+        print("\nSelect Rotator Provider:")
+        providers = list(ROTATOR_PRESETS.keys())
+        for i, p in enumerate(providers, 1):
+            print(f"  {i}) {p}")
+        print(f"  {len(providers)+1}) Custom")
         
-        if rot_choice == "1":
-            config_data["llm"]["model"] = "groq-llama"
-        elif rot_choice == "2":
-            config_data["llm"]["model"] = "gemini-flash"
+        p_choice = input(f"Choice [1-{len(providers)+1}]: ").strip()
+        
+        if p_choice.isdigit() and 1 <= int(p_choice) <= len(providers):
+            provider_key = providers[int(p_choice) - 1]
+            models = ROTATOR_PRESETS[provider_key]
+            
+            print(f"\nSelect {provider_key} Model:")
+            for i, (m_id, m_desc) in enumerate(models, 1):
+                print(f"  {i}) {m_id} - {m_desc}")
+            
+            m_choice = input(f"Choice [1-{len(models)}]: ").strip()
+            if m_choice.isdigit() and 1 <= int(m_choice) <= len(models):
+                config_data["llm"]["model"] = models[int(m_choice) - 1][0]
+            else:
+                config_data["llm"]["model"] = models[0][0] # Default to first
         else:
             cust_model = input("Enter custom model name: ").strip()
             if cust_model:
                 config_data["llm"]["model"] = cust_model
+            else:
+                config_data["llm"]["model"] = "groq-llama"
 
         config_data["llm"]["api_key"] = "sk-local-rotator" # Default dummy key
         print(f"\n✓ Local Rotator configured: {base_url}")
@@ -532,7 +637,7 @@ def cmd_setup(args):
     print()
     print("[3/6] Process Information")
     print("-" * 40)
-    print("Help bot-monitor understand what you're monitoring:")
+    print("Help telewatch understand what you're monitoring:")
     print()
     
     process_name = input("Process name (e.g., 'Data Migration', 'Model Training') [My Process]: ").strip()
@@ -731,7 +836,7 @@ def cmd_setup(args):
     print()
     
     # Create config directory
-    config_dir = Path.home() / ".config" / "bot-monitor"
+    config_dir = Path.home() / ".telewatch"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
     
@@ -756,13 +861,13 @@ def cmd_setup(args):
     
     next_choice = input("Choice [1-2]: ").strip()
     if next_choice == "1":
-        print("\nStarting bot-monitor...\n")
+        print("\nStarting telewatch...\n")
         # Load config and start
         args.config = config_path
         cmd_start(args)
     else:
         print("\n✓ All done! Start monitoring with:")
-        print(f"   bot-monitor start")
+        print(f"   telewatch start")
         print()
 
 
@@ -810,7 +915,7 @@ def cmd_start(args):
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Bot Monitor - Universal process monitoring with LLM analysis"
+        description="TeleWatch - Universal process monitoring with LLM analysis"
     )
     
     parser.add_argument(

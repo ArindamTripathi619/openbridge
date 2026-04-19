@@ -19,7 +19,7 @@ def run_test():
     Path(LOG_FILE).touch()
     if os.path.exists("/home/DevCrewX/.telewatch/state.json"): os.remove("/home/DevCrewX/.telewatch/state.json")
 
-    config_path = Path("/home/DevCrewX/.config/bot-monitor/drift_config.yaml")
+    config_path = Path("/home/DevCrewX/.telewatch/drift_config.yaml")
     config_content = """
 telegram:
   bot_token: "DUMMY"
@@ -40,7 +40,7 @@ monitors:
     
     print("🚀 Starting Bot...")
     bot_proc = subprocess.Popen(
-        ["./venv/bin/python3", "-m", "bot_monitor.main", "start", "--config", str(config_path)],
+        ["./venv/bin/python3", "-m", "telewatch.main", "start", "--config", str(config_path)],
         env={**os.environ, "PYTHONPATH": "src"}
     )
     

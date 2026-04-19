@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🤖 Bot Monitor Installation Script"
+echo "🤖 TeleWatch Installation Script"
 echo "==================================="
 echo ""
 
@@ -17,12 +17,12 @@ echo "✓ Found Python $PYTHON_VERSION"
 # Determine installation directory
 if [ "$EUID" -eq 0 ]; then
     # Running as root, install system-wide
-    INSTALL_DIR="/opt/bot-monitor"
+    INSTALL_DIR="/opt/telewatch"
     BIN_DIR="/usr/local/bin"
     echo "📦 Installing system-wide to $INSTALL_DIR"
 else
     # User installation
-    INSTALL_DIR="$HOME/.local/bot-monitor"
+    INSTALL_DIR="$HOME/.local/telewatch"
     BIN_DIR="$HOME/.local/bin"
     echo "📦 Installing to $INSTALL_DIR (user-local)"
 fi
@@ -44,7 +44,7 @@ echo "Upgrading pip..."
 pip install --upgrade pip > /dev/null
 
 # Install package
-echo "Installing bot-monitor..."
+echo "Installing telewatch..."
 if [ -f "setup.py" ]; then
     # Installing from source
     pip install -e . > /dev/null
@@ -55,7 +55,7 @@ fi
 
 # Create symlink
 echo "Creating executable symlink..."
-ln -sf "$INSTALL_DIR/venv/bin/bot-monitor" "$BIN_DIR/bot-monitor"
+ln -sf "$INSTALL_DIR/venv/bin/telewatch" "$BIN_DIR/telewatch"
 
 # Check if bin directory is in PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -81,8 +81,8 @@ After=network.target
 [Service]
 Type=forking
 User=$SUDO_USER
-ExecStart=$BIN_DIR/bot-monitor start -d
-ExecStop=$BIN_DIR/bot-monitor stop
+ExecStart=$BIN_DIR/telewatch start -d
+ExecStop=$BIN_DIR/telewatch stop
 Restart=always
 RestartSec=10
 
@@ -100,8 +100,8 @@ echo ""
 echo "✓ Installation complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Run: bot-monitor setup"
-echo "  2. Edit config: ~/.config/bot-monitor/config.yaml"
-echo "  3. Start monitoring: bot-monitor start"
+echo "  1. Run: telewatch setup"
+echo "  2. Edit config: ~/.telewatch/config.yaml"
+echo "  3. Start monitoring: telewatch start"
 echo ""
-echo "For help: bot-monitor --help"
+echo "For help: telewatch --help"

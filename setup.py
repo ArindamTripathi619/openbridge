@@ -7,7 +7,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="bot-monitor",
+    name="telewatch",
     version="0.1.0",
     author="DevCrewX",
     description="Universal process monitoring with LLM analysis and Telegram notifications",
@@ -31,7 +31,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "bot-monitor=bot_monitor.cli:main",
+            "telewatch=telewatch.cli:main",
         ],
     },
 )

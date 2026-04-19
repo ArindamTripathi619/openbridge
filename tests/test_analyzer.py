@@ -8,9 +8,9 @@ from datetime import datetime
 # Ensure src is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.bot_monitor.analyzers.event_analyzer import EventAnalyzer, Analysis
-from src.bot_monitor.monitors.base import MonitorEvent, Severity
-from src.bot_monitor.analyzers.token_tracker import TokenUsageTracker
+from src.telewatch.analyzers.event_analyzer import EventAnalyzer, Analysis
+from src.telewatch.monitors.base import MonitorEvent, Severity
+from src.telewatch.analyzers.token_tracker import TokenUsageTracker
 
 class TestEventAnalyzer(unittest.TestCase):
     def test_event_analyzer_caching(self):
@@ -75,7 +75,7 @@ class TestEventAnalyzer(unittest.TestCase):
             "critical": [r"Database connection lost"]
         }
         
-        from src.bot_monitor.analyzers.pattern_matcher import SeverityPatternMatcher
+        from src.telewatch.analyzers.pattern_matcher import SeverityPatternMatcher
         matcher = SeverityPatternMatcher(patterns)
         
         analyzer = EventAnalyzer(

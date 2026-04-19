@@ -81,6 +81,15 @@ class FileMonitor(BaseMonitor):
             self.observer.join()
             self.observer = None
     
+    # Built-in completion phrases (always scanned, no config needed)
+    COMPLETION_PHRASES = [
+        'completed successfully', 'finished successfully',
+        'process complete', 'job finished', 'all tasks done',
+        'exiting normally', 'shutdown complete', 'run finished',
+        'execution complete', 'task completed', 'work done',
+        'graceful shutdown', 'exiting with code 0',
+    ]
+
     def process_new_lines(self):
         """Process new lines added to file."""
         with self._lock:
@@ -115,7 +124,14 @@ class FileMonitor(BaseMonitor):
                             if p.search(line):
                                 # Mark as progress event
                                 self._emit_event(line, Severity.INFO, {"is_progress": True})
+                                matched = True
                                 break
+                    
+                    # Always check for built-in completion phrases (bypass keyword filter)
+                    if not matched:
+                        line_lower = line.lower()
+                        if any(phrase in line_lower for phrase in self.COMPLETION_PHRASES):
+                            self._emit_event(line, Severity.INFO, {"is_completion": True})
             
             except Exception as e:
                 self._emit_event(

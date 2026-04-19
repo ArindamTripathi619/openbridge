@@ -22,7 +22,7 @@ class TelegramNotifier:
     }
     
     def __init__(self, bot_token: str, chat_id: str, 
-                 rate_limit_per_hour: int = 10):
+                 rate_limit_per_hour: int = 50):
         """Initialize notifier.
         
         Args:
@@ -88,7 +88,7 @@ class TelegramNotifier:
                 async with Bot(self.bot_token) as bot:
                     await bot.send_message(
                         chat_id=self.chat_id,
-                        text="🤖 <b>Bot Monitor Test</b>\n\nYour monitoring system is configured correctly!",
+                        text="🤖 <b>TeleWatch Test</b>\n\nYour monitoring system is configured correctly!",
                         parse_mode="HTML",
                     )
 

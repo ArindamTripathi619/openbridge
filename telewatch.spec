@@ -3,7 +3,7 @@ import sys
 import os
 from PyInstaller.utils.hooks import collect_submodules
 
-# Add src to sys.path so PyInstaller can find bot_monitor
+# Add src to sys.path so PyInstaller can find telewatch
 sys.path.insert(0, os.path.abspath('src'))
 
 block_cipher = None
@@ -20,10 +20,10 @@ hidden_imports = [
     'psutil',
     'watchdog',
     'telegram',
-] + collect_submodules('bot_monitor') + collect_submodules('rich') + collect_submodules('watchdog') + collect_submodules('telegram')
+] + collect_submodules('telewatch') + collect_submodules('rich') + collect_submodules('watchdog') + collect_submodules('telegram')
 
 a = Analysis(
-    ['src/bot_monitor/main.py'],
+    ['src/telewatch/main.py'],
     pathex=['src'],
     binaries=[],
     datas=[],

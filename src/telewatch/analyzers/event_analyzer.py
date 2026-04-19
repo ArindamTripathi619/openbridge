@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from collections import deque
@@ -126,7 +127,7 @@ class EventAnalyzer:
                         source="AnomalyDetector",
                         severity=Severity.WARNING,
                         content=anomaly["message"],
-                        timestamp=time.time(),
+                        timestamp=datetime.now(),
                         metadata={"type": "spike"}
                     )
                 )
@@ -221,7 +222,7 @@ class EventAnalyzer:
                     severity=Severity.CRITICAL,
                     summary="⚠️ LLM API QUOTA EXHAUSTED",
                     root_cause="Your LLM API quota/credits have been exhausted. Analysis is temporarily disabled.",
-                    suggested_action="Update your API key in config: ~/.config/bot-monitor/config.yaml, then restart bot-monitor",
+                    suggested_action="Update your API key in config: ~/.config/telewatch/config.yaml, then restart telewatch",
                     original_event=event
                 )
             
@@ -231,7 +232,7 @@ class EventAnalyzer:
                     severity=Severity.CRITICAL,
                     summary="⚠️ LLM API AUTHENTICATION FAILED",
                     root_cause="Invalid or expired API key.",
-                    suggested_action="Update your API key in config: ~/.config/bot-monitor/config.yaml, then restart bot-monitor",
+                    suggested_action="Update your API key in config: ~/.config/telewatch/config.yaml, then restart telewatch",
                     original_event=event
                 )
             
@@ -409,7 +410,7 @@ Respond ONLY with valid JSON.
                     source="AnomalyDetector",
                     severity=Severity.CRITICAL,
                     content=anomaly["message"],
-                    timestamp=time.time(),
+                    timestamp=datetime.now(),
                     metadata={"type": "stall"}
                 )
             )

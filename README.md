@@ -1,4 +1,4 @@
-# Bot Monitor 🤖
+# TeleWatch 🤖
 
 **Universal process monitoring with LLM-powered analysis and Telegram notifications**
 
@@ -35,7 +35,7 @@ Monitor long-running processes on remote servers, get intelligent alerts when th
 Run the interactive setup wizard - it will guide you through everything:
 
 ```bash
-bot-monitor setup
+telewatch setup
 ```
 
 📘 **New to TeleWatch?** Check out our detailed [Onboarding Guide](./ONBOARDING.md) for a step-by-step walkthrough, including Daemon background execution and Turbo mode for edge devices.
@@ -50,7 +50,7 @@ bot-monitor setup
 
 **Example Session:**
 ```
-🤖 Bot Monitor Setup Wizard
+🤖 TeleWatch Setup Wizard
 ========================================
 
 [1/5] Telegram Bot Configuration
@@ -100,7 +100,7 @@ Configuration Summary:
   • Monitors: 1 configured
   • Rate limit: 15/hour
 
-Save to ~/.config/bot-monitor/config.yaml? [Y/n]: y
+Save to ~/.config/telewatch/config.yaml? [Y/n]: y
 ✓ Configuration saved!
 
 🚀 Setup complete! What next?
@@ -109,14 +109,14 @@ Save to ~/.config/bot-monitor/config.yaml? [Y/n]: y
 
 Choice [1-2]: 1
 
-Starting bot-monitor...
+Starting telewatch...
 ✓ File monitor: myapp.log
 ✓ Monitoring active. Press Ctrl+C to stop.
 ```
 
 ### Configuration
 
-Edit `~/.config/bot-monitor/config.yaml`:
+Edit `~/.config/telewatch/config.yaml`:
 
 ```yaml
 telegram:
@@ -247,7 +247,7 @@ monitors:
 
 ### 3. LLM Configuration
 TeleWatch supports highly resilient analysis:
-- **Local API Rotator**: Point to a local LiteLLM proxy for cost-effective, rotated API usage.
+- **Local API Rotator**: Point to a local LiteLLM proxy with 50+ models across Groq, Gemini, Scaleway, Mistral, and OpenRouter.
 - **Ollama**: 100% private, local analysis.
 - **Cloud Providers**: Groq (Fast), OpenAI, Anthropic.
 
@@ -274,21 +274,21 @@ Run as a system service:
 
 ```bash
 # Create service file
-sudo nano /etc/systemd/system/bot-monitor.service
+sudo nano /etc/systemd/system/telewatch.service
 ```
 
 ```ini
 [Unit]
-Description=Bot Monitor
+Description=TeleWatch
 After=network.target
 
 [Service]
 Type=simple
 User=your-username
-WorkingDirectory=/opt/bot-monitor
+WorkingDirectory=/opt/telewatch
 Environment="TELEGRAM_BOT_TOKEN=..."
 Environment="LLM_API_KEY=..."
-ExecStart=/path/to/venv/bin/bot-monitor start
+ExecStart=/path/to/venv/bin/telewatch start
 Restart=on-failure
 
 [Install]
@@ -297,18 +297,18 @@ WantedBy=multi-user.target
 
 ```bash
 # Enable and start
-sudo systemctl enable bot-monitor
-sudo systemctl start bot-monitor
-sudo systemctl status bot-monitor
+sudo systemctl enable telewatch
+sudo systemctl start telewatch
+sudo systemctl status telewatch
 ```
 
 ## Troubleshooting
 
 ### "No configuration file found"
-Run `bot-monitor setup` or create config at `~/.config/bot-monitor/config.yaml`
+Run `telewatch setup` or create config at `~/.config/telewatch/config.yaml`
 
 ### "File not found" for log monitoring
-Check file path exists and bot-monitor has read permissions
+Check file path exists and telewatch has read permissions
 
 ### "Process with PID X does not exist"
 Update PID in config before starting
@@ -316,20 +316,20 @@ Update PID in config before starting
 ### Telegram messages not received
 1. Check bot token is correct
 2. Verify you've started a chat with the bot
-3. Run `bot-monitor test-notification`
+3. Run `telewatch test-notification`
 4. Check chat ID is your user ID, not group ID
 
 ### LLM API errors
 1. Verify API key is set correctly
 2. Check API quota/credits
-3. Test with `bot-monitor test-notification`
+3. Test with `telewatch test-notification`
 
 ## Architecture
 
 ```mermaid
 flowchart TD
 
-    A[Configuration (YAML)]
+    A["Configuration (YAML)"]
     B[Monitor Manager]
 
     A --> B
@@ -342,8 +342,9 @@ flowchart TD
     C2 --> D
     C3 --> D
 
-    D --> E[LLM Analyzer]
-    E --> F[Telegram Notifier]
+    D --> E["LLM Analyzer (Smart Analysis)"]
+    F["Telegram Notifier"]
+    E --> F
 ```
 
 ## Contributing

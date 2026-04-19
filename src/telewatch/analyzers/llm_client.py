@@ -1,8 +1,56 @@
-"""Multi-provider LLM client."""
-
 import os
-from typing import Dict, Any, Optional
+import requests
+from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
+
+# Local LLM Rotator Presets from API_REPORT.md
+ROTATOR_PRESETS = {
+    "Groq": [
+        ("groq-llama", "Llama 3.3 70B (Flagship)"),
+        ("groq-llama-small", "Llama 3.1 8B (Fast)"),
+        ("groq-scout", "Llama 4 Scout 17B (Vision)"),
+        ("groq-gpt-oss", "GPT-OSS 120B (Reasoning)"),
+        ("groq-gpt-oss-mini", "GPT-OSS 20B (Fast Reasoning)"),
+        ("groq-qwen", "Qwen3 32B (Multilingual)"),
+        ("groq-kimi", "Kimi K2 0905 (Long Context)"),
+    ],
+    "Gemini": [
+        ("gemini-flash", "Gemini 2.0 Flash (Vision/Context)"),
+    ],
+    "Scaleway": [
+        ("scw-qwen-235b", "Qwen3 235B (Large)"),
+        ("scw-gpt-oss", "GPT-OSS 120B (Reasoning)"),
+        ("scw-llama-70b", "Llama 3.3 70B"),
+        ("scw-llama-8b", "Llama 3.1 8B"),
+        ("scw-deepseek-r1", "DeepSeek R1 (Reasoning)"),
+        ("scw-devstral", "Devstral 2 123B (Code)"),
+        ("scw-gemma", "Gemma 3 27B"),
+        ("scw-mistral-small", "Mistral Small 3.2 24B"),
+        ("scw-pixtral", "Pixtral 12B (Vision)"),
+        ("scw-qwen-coder", "Qwen3 Coder 30B"),
+    ],
+    "Mistral": [
+        ("mistral-large", "Mistral Large (Reasoning)"),
+        ("mistral-medium", "Mistral Medium"),
+        ("mistral-small", "Mistral Small"),
+        ("mistral-codestral", "Codestral (Code)"),
+        ("mistral-devstral", "Devstral (Coding Agent)"),
+        ("mistral-ministral-8b", "Ministral 8B"),
+        ("mistral-nemo", "Open Mistral Nemo"),
+        ("mistral-tiny", "Mistral Tiny"),
+    ],
+    "OpenRouter": [
+        ("or-llama-70b", "Llama 3.3 70B"),
+        ("or-gpt-oss", "GPT-OSS 120B"),
+        ("or-qwen-coder", "Qwen3 Coder"),
+        ("or-gemma-27b", "Gemma 3 27B"),
+        ("or-mistral-small", "Mistral Small 3.1"),
+        ("or-hermes-405b", "Hermes 3 405B"),
+        ("or-nemotron-30b", "Nemotron 3 Nano"),
+        ("or-step-flash", "Step 3.5 Flash (256K)"),
+        ("or-glm", "GLM 4.5 Air"),
+    ]
+}
 
 
 class LLMError(Exception):

@@ -2,7 +2,7 @@
 
 import unittest
 import time
-from bot_monitor.analyzers.anomaly_detector import AnomalyDetector
+from telewatch.analyzers.anomaly_detector import AnomalyDetector
 
 class TestAnomalyDetector(unittest.TestCase):
     """Test suite for anomaly detection functionality."""

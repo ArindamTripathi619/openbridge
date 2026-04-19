@@ -1,9 +1,9 @@
-# Bot Monitor Configuration
+# TeleWatch Configuration
 
 telegram:
   # Get bot token from @BotFather on Telegram
   bot_token: "${TELEGRAM_BOT_TOKEN}"
-  # Your Telegram chat ID (use bot-monitor setup to find it)
+  # Your Telegram chat ID (use telewatch setup to find it)
   chat_id: "${TELEGRAM_CHAT_ID}"
 
 llm:

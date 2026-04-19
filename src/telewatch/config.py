@@ -1,4 +1,4 @@
-"""Configuration management for bot-monitor."""
+"""Configuration management for telewatch."""
 
 import os
 import yaml
@@ -16,8 +16,9 @@ class Config:
     """Configuration manager."""
     
     CONFIG_SEARCH_PATHS = [
-        Path.home() / ".config" / "bot-monitor" / "config.yaml",
-        Path("/etc/bot-monitor/config.yaml"),
+        Path.home() / ".telewatch" / "config.yaml",
+        Path.home() / ".config" / "telewatch" / "config.yaml",
+        Path("/etc/telewatch/config.yaml"),
         Path("config.yaml"),
     ]
     
@@ -244,12 +245,12 @@ def create_example_config(output_path: Path):
     Args:
         output_path: Path where to save example config.
     """
-    example = """# Bot Monitor Configuration
+    example = """# TeleWatch Configuration
 
 telegram:
   # Get bot token from @BotFather on Telegram
   bot_token: "${TELEGRAM_BOT_TOKEN}"
-  # Your Telegram chat ID (use bot-monitor setup to find it)
+  # Your Telegram chat ID (use telewatch setup to find it)
   chat_id: "${TELEGRAM_CHAT_ID}"
 
 llm:

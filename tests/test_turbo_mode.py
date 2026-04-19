@@ -3,10 +3,10 @@
 import unittest
 import time
 from unittest.mock import MagicMock
-from bot_monitor.analyzers.event_analyzer import EventAnalyzer
-from bot_monitor.analyzers.llm_client import BaseLLMClient
-from bot_monitor.monitors.base import MonitorEvent, Severity
-from bot_monitor.config import Config
+from telewatch.analyzers.event_analyzer import EventAnalyzer
+from telewatch.analyzers.llm_client import BaseLLMClient
+from telewatch.monitors.base import MonitorEvent, Severity
+from telewatch.config import Config
 
 class MockLLM(BaseLLMClient):
     def analyze(self, prompt): return 'test'
@@ -45,7 +45,7 @@ class TestTurboMode(unittest.TestCase):
             
     def test_monitor_manager_turbo_flag(self):
         """Verify MonitorManager passes turbo flag correctly."""
-        from bot_monitor.cli import MonitorManager
+        from telewatch.cli import MonitorManager
         
         # Mock config
         mock_config = MagicMock(spec=Config)
@@ -55,7 +55,7 @@ class TestTurboMode(unittest.TestCase):
         mock_config.get_notification_config.return_value = {'rate_limit_per_hour': 10}
         
         # Mock create_llm_client to avoid import errors or API calls
-        with unittest.mock.patch('bot_monitor.cli.create_llm_client') as mock_create:
+        with unittest.mock.patch('telewatch.cli.create_llm_client') as mock_create:
             mock_create.return_value = MockLLM()
             
             # Test Turbo=True

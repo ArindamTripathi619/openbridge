@@ -180,7 +180,7 @@ class SetupWizard:
     def _step_5_save(self):
         console.print("\n[bold]5. Finalize[/bold]", style="cyan")
         
-        config_dir = Path.home() / ".config" / "bot-monitor"
+        config_dir = Path.home() / ".config" / "telewatch"
         # Create directory with 0o700 (rwx------)
         config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_path = config_dir / "config.yaml"

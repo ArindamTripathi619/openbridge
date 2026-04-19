@@ -7,12 +7,12 @@ from pathlib import Path
 from rich.console import Console
 from rich.live import Live
 
-from bot_monitor.config import Config
-from bot_monitor.cli import MonitorManager  # We will keep the manager logic but wrap it
-from bot_monitor.core.state import StateManager, BotState
-from bot_monitor.ui.wizard import SetupWizard
-from bot_monitor.ui.dashboard import Dashboard
-from bot_monitor.core.logging import setup_logger, get_logger
+from telewatch.config import Config
+from telewatch.cli import MonitorManager  # We will keep the manager logic but wrap it
+from telewatch.core.state import StateManager, BotState
+from telewatch.ui.wizard import SetupWizard
+from telewatch.ui.dashboard import Dashboard
+from telewatch.core.logging import setup_logger, get_logger
 
 logger = get_logger("main")
 
@@ -21,7 +21,7 @@ console = Console()
 state_manager = StateManager()
 
 def get_config_path() -> Path:
-    return Path.home() / ".config" / "bot-monitor" / "config.yaml"
+    return Path.home() / ".config" / "telewatch" / "config.yaml"
 
 @app.command()
 def setup():

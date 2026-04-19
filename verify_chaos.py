@@ -7,7 +7,7 @@ from pathlib import Path
 
 def run_test():
     # 1. Prepare config for chaos.log
-    config_path = Path("/home/DevCrewX/.config/bot-monitor/chaos_config.yaml")
+    config_path = Path("/home/DevCrewX/.telewatch/chaos_config.yaml")
     config_content = """
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"
@@ -39,7 +39,7 @@ monitors:
     
     print("🚀 Launching TeleWatch on chaos.log...")
     bot_proc = subprocess.Popen(
-        ["./venv/bin/python3", "-m", "bot_monitor.main", "start", "--config", str(config_path)],
+        ["./venv/bin/python3", "-m", "telewatch.main", "start", "--config", str(config_path)],
         env={**os.environ, "PYTHONPATH": "src"}
     )
     

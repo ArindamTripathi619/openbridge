@@ -1,7 +1,7 @@
 """Tests for the LogProfiler component."""
 
 import unittest
-from bot_monitor.analyzers.log_profiler import LogProfiler
+from telewatch.analyzers.log_profiler import LogProfiler
 
 class TestLogProfiler(unittest.TestCase):
     """Test suite for log profiler functionality."""
