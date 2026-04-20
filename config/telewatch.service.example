@@ -1,0 +1,18 @@
+[Unit]
+Description=TeleWatch Telegram OpenCode Bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/DevCrewX/Projects/TelegramRemoteProgressBot
+EnvironmentFile=%h/.config/telewatch/bridge.env
+ExecStart=/home/DevCrewX/Projects/TelegramRemoteProgressBot/.venv/bin/telewatch start --foreground
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -10,7 +10,7 @@ setup(
     name="telewatch",
     version="0.1.0",
     author="DevCrewX",
-    description="Universal process monitoring with LLM analysis and Telegram notifications",
+    description="Telegram to opencode relay bot",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/DevCrewX/TelegramRemoteProgressBot",
@@ -31,7 +31,8 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "telewatch=telewatch.cli:main",
+            "telewatch=telewatch.app:main",
+            "telewatch-opencode-bridge=telewatch.opencode_bridge:main",
         ],
     },
 )

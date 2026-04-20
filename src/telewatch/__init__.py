@@ -1,3 +1,3 @@
-"""TeleWatch - Universal process monitoring with LLM analysis."""
+"""Telegram to opencode relay."""
 
 __version__ = "0.1.0"
