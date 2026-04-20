@@ -4,6 +4,26 @@ Minimal Telegram application that forwards a chat message to `opencode`, waits f
 
 The recommended workflow is the built-in setup wizard. It collects the bot token, model, working dir, timeout, allowed chat ids, log level, and optional LLM settings for both input prompt enhancement and output prettification, then writes the config file for you.
 
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[Telegram user sends a message] --> B[Bot receives text]
+    B --> C{Allowed chat id}
+    C -- no --> D[Reply chat not allowed]
+    C -- yes --> E[Optional input LLM rewrites prompt]
+    E --> F[OpenCode runs prompt in background]
+    F --> G{OpenCode result}
+    G --> H[Optional output LLM prettifies result]
+    G --> I[Fallback raw cleaned output]
+    H --> J[Split into Telegram-safe chunks]
+    I --> J
+    J --> K[Bot sends final messages to Telegram]
+    K --> L[Health and stats updated]
+    M[telewatch setup] --> N[Wizard writes config]
+    N --> B
+```
+
 ## Quick Start
 
 1. Run `telewatch setup`.
