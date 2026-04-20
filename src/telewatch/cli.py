@@ -14,6 +14,8 @@ from .monitors import FileMonitor, PIDMonitor, JournalMonitor, BaseMonitor
 from .analyzers import create_llm_client, EventAnalyzer, ROTATOR_PRESETS
 from .notifiers import TelegramNotifier
 from .core.logging import get_logger
+from .storm_detector import StormDetector
+from .opencode_runner import OpenCodeRunner
 
 logger = get_logger("manager")
 
@@ -59,8 +61,29 @@ class MonitorManager:
         self.notifier = TelegramNotifier(
             bot_token=telegram_config["bot_token"],
             chat_id=telegram_config["chat_id"],
-            rate_limit_per_hour=notification_config["rate_limit_per_hour"]
+            rate_limit_per_hour=notification_config["rate_limit_per_hour"],
+            debounce_seconds=notification_config["debounce_seconds"]
         )
+        
+        # Initialize Opencode Integration
+        op_cfg = config.get_opencode_config()
+        self.opencode_enabled = op_cfg.get("enabled", False)
+        if self.opencode_enabled:
+            if OpenCodeRunner.is_available():
+                self.storm_detector = StormDetector(
+                    threshold=op_cfg.get("storm_threshold", 10),
+                    window_seconds=op_cfg.get("storm_window_seconds", 60),
+                    cooldown_seconds=op_cfg.get("cooldown_seconds", 300)
+                )
+                self.opencode_runner = OpenCodeRunner(
+                    working_dir=op_cfg.get("working_dir", "."),
+                    timeout=op_cfg.get("timeout_seconds", 120),
+                    model=op_cfg.get("model")
+                )
+                logger.info("OpenCode framework initialized for alert gating.")
+            else:
+                logger.warning("OpenCode enabled in config but binary not found in PATH.")
+                self.opencode_enabled = False
         
         # Initialize progress tracking if enabled
         from .tracker import ProgressTracker
@@ -228,14 +251,14 @@ class MonitorManager:
                         analysis = self.analyzer.analyze_event(event)
                         
                         # Handle main analysis
-                        if self.notifier.send_analysis(analysis):
-                            logger.info(f"Analysis sent: {analysis.summary}")
+                        if self._dispatch_alert(analysis, log_tail=str(getattr(event, 'content', ''))):
+                            logger.info(f"Analysis sent or gated.")
                         
                         # Handle any side anomalies (e.g. spikes)
                         while getattr(self.analyzer, 'pending_anomalies', []):
                             side_analysis = self.analyzer.pending_anomalies.pop(0)
-                            if self.notifier.send_analysis(side_analysis):
-                                logger.info(f"Side-analysis sent: {side_analysis.summary}")
+                            if self._dispatch_alert(side_analysis):
+                                logger.info(f"Side-analysis sent or gated.")
                     
                     except Exception as e:
                         logger.error(f"Error processing event: {e}")
@@ -265,8 +288,8 @@ class MonitorManager:
                     # 2. Check for general log stream stall
                     stall_analysis = self.analyzer.check_stall()
                     if stall_analysis:
-                        self.notifier.send_analysis(stall_analysis)
-                        logger.warning(f"Stall alert sent: {stall_analysis.summary}")
+                        self._dispatch_alert(stall_analysis)
+                        logger.warning(f"Stall alert evaluated.")
                 
                 except Exception as e:
                     logger.error(f"Periodic check error: {e}")
@@ -349,8 +372,8 @@ class MonitorManager:
     def _handle_progress_stall(self):
         """Handle progress tracker specifically stalled."""
         stall_msg = f"⚠️ **Warning:** {self.progress_tracker.process_name} appears stalled at {self.progress_tracker.current_percentage:.1f}%"
-        self.notifier.send_message(stall_msg)
-        logger.warning(f"Progress stall alert sent for {self.progress_tracker.process_name}")
+        self._dispatch_alert(stall_msg)
+        logger.warning(f"Progress stall alert evaluated for {self.progress_tracker.process_name}")
 
     def _handle_user_message(self, text: str, is_command: bool = False, cmd: str = None, args: List[str] = None):
         """Handle incoming user message or command."""
@@ -379,8 +402,81 @@ class MonitorManager:
             self.notifier.send_message("🛑 <b>TeleWatch stopped remotely.</b>\nMonitoring has been terminated.")
             logger.info("Remote /stop command received – shutting down")
             self.stop()
+        elif cmd == "run":
+            if getattr(self, "opencode_enabled", False) and getattr(self, "opencode_runner", None):
+                query = " ".join(args) if args else ""
+                if not query:
+                    self.notifier.send_message("❌ Please provide a command (e.g. /run check disk usage)")
+                    return
+                self.notifier.send_message(f"🏃 Running: `{query}`...")
+                
+                import asyncio
+                from .opencode_prompts import manual_prompt
+                proc_name = self.progress_tracker.process_name if getattr(self, "progress_tracker", None) else "unknown"
+                prompt = manual_prompt(query, "telewatch logs", proc_name)
+                
+                try:
+                    result = asyncio.run(self.opencode_runner.run(prompt))
+                    chunks = self.opencode_runner.chunk(result)
+                    for c in chunks:
+                        self.notifier.send_message(f"💻 **Output:**\n```\n{c}\n```")
+                except Exception as e:
+                    self.notifier.send_message(f"❌ OpenCode error: {e}")
+            else:
+                self.notifier.send_message("❌ OpenCode is not available/enabled.")
         else:
-            self.notifier.send_message(f"❓ **Unknown command:** /{cmd}\nAvailable: /status, /pause, /resume, /logs, /stop")
+            self.notifier.send_message(f"❓ **Unknown command:** /{cmd}\nAvailable: /status, /pause, /resume, /logs, /run, /stop")
+
+    def _dispatch_alert(self, item, log_tail: str = "") -> bool:
+        """
+        Intercept outgoing alerts (strings or Analysis objects) applying storm gating.
+        Executes OpenCode tier-2 evaluation if a storm is triggered.
+        """
+        import asyncio
+        
+        # 1. Storm Gating
+        if getattr(self, "opencode_enabled", False) and getattr(self, "storm_detector", None):
+            is_new_storm = self.storm_detector.record_alert()
+            
+            if self.storm_detector.is_storming():
+                if is_new_storm:
+                    logger.warning("Alert STORM detected. Escalating to OpenCode...")
+                    # Build prompt
+                    from .opencode_prompts import storm_prompt
+                    prompt = storm_prompt(
+                        log_path="monitored process",
+                        log_tail=log_tail,
+                        alert_count=self.storm_detector.threshold,
+                        window_seconds=self.storm_detector.window_seconds,
+                        keywords=[]
+                    )
+                    
+                    self.notifier.send_message(f"🌪️ **Alert Storm Detected!** ({self.storm_detector.threshold} alerts in {self.storm_detector.window_seconds}s). OpenCode is investigating...")
+                    
+                    try:
+                        # Synchronous execution of async OpenCode
+                        result = asyncio.run(self.opencode_runner.run(prompt))
+                        # Send the result chunks
+                        chunks = self.opencode_runner.chunk(result)
+                        for c in chunks:
+                            self.notifier.send_message(f"🤖 **OpenCode Diagnosis:**\n```\n{c}\n```")
+                    except Exception as e:
+                        logger.error(f"OpenCode run failed: {e}")
+                        self.notifier.send_message("❌ **OpenCode Failed:** Returning to normal alerts.")
+                    
+                    # Enter cooldown after reporting
+                    self.storm_detector.enter_cooldown()
+                    
+                else:
+                    # We are in storm/cooldown, suppress individual alert.
+                    logger.debug("Alert suppressed due to storm cooldown.")
+                return True # Handled/suppressed
+            
+        # 2. Normal dispatch
+        if hasattr(item, "summary"):
+            return self.notifier.send_analysis(item)
+        else:
+            return self.notifier.send_message(item)
 
     def _send_status_report(self):
         """Generate and send full status report."""
@@ -635,7 +731,7 @@ def cmd_setup(args):
     
     # Step 3: Process Information (NEW)
     print()
-    print("[3/6] Process Information")
+    print("[3/7] Process Information")
     print("-" * 40)
     print("Help telewatch understand what you're monitoring:")
     print()
@@ -686,7 +782,7 @@ def cmd_setup(args):
     
     # Step 4: Monitor Configuration
     print()
-    print("[4/6] Monitor Configuration")
+    print("[4/7] Monitor Configuration")
     print("-" * 40)
     print("What would you like to monitor?")
     print()
@@ -810,7 +906,7 @@ def cmd_setup(args):
     
     # Step 5: Notification Settings
     print()
-    print("[5/6] Notification Settings")
+    print("[5/7] Notification Settings")
     print("-" * 40)
     
     rate_input = input(f"Max notifications per hour [10]: ").strip()
@@ -822,9 +918,35 @@ def cmd_setup(args):
     
     print(f"✓ Rate limit: {config_data['notification']['rate_limit_per_hour']}/hour")
     
-    # Step 6: Save Configuration
+    # Step 6: OpenCode Integration
     print()
-    print("[6/6] Save Configuration")
+    print("[6/7] OpenCode Intelligence")
+    print("-" * 40)
+    
+    use_opencode = input("Enable OpenCode for advanced error handling and /run commands? [Y/n]: ").strip().lower()
+    if use_opencode != 'n':
+        # Quick check if it's installed
+        import shutil
+        if shutil.which("opencode"):
+            print("  ✓ opencode binary found!")
+        else:
+            print("  ⚠️ opencode not found in PATH. You can install it later:")
+            print("     curl -fsSL https://opencode.ai/install | sh")
+            
+        config_data["opencode"] = {
+            "enabled": True,
+            "working_dir": ".",
+            "timeout_seconds": 120,
+            "storm_threshold": 10,
+            "storm_window_seconds": 60,
+            "cooldown_seconds": 300
+        }
+    else:
+        config_data["opencode"] = {"enabled": False}
+        
+    # Step 7: Save Configuration
+    print()
+    print("[7/7] Save Configuration")
     print("-" * 40)
     
     # Display summary
@@ -833,6 +955,7 @@ def cmd_setup(args):
     print(f"  • LLM: ✓ {provider.capitalize()} ({config_data['llm']['model']})")
     print(f"  • Monitors: {len(config_data['monitors'])} configured")
     print(f"  • Rate limit: {config_data['notification']['rate_limit_per_hour']}/hour")
+    print(f"  • OpenCode: {'Enabled' if config_data['opencode']['enabled'] else 'Disabled'}")
     print()
     
     # Create config directory

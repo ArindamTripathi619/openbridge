@@ -22,17 +22,20 @@ class TelegramNotifier:
     }
     
     def __init__(self, bot_token: str, chat_id: str, 
-                 rate_limit_per_hour: int = 50):
+                 rate_limit_per_hour: int = 50,
+                 debounce_seconds: int = 300):
         """Initialize notifier.
         
         Args:
             bot_token: Telegram bot token.
             chat_id: Chat ID to send messages to.
             rate_limit_per_hour: Maximum messages per hour.
+            debounce_seconds: Seconds between alerts for the same condition.
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.rate_limit = rate_limit_per_hour
+        self.debounce_seconds = debounce_seconds
         
         # Track message timestamps for rate limiting
         self.message_times: deque = deque()

@@ -238,6 +238,22 @@ class Config:
         }
         return {**defaults, **self.data.get('anomaly_detection', {})}
 
+    def get_opencode_config(self) -> Dict[str, Any]:
+        """Get OpenCode integration configuration.
+        
+        Returns:
+            OpenCode config dict with defaults.
+        """
+        defaults = {
+            "enabled": True,
+            "working_dir": ".",
+            "timeout_seconds": 120,
+            "storm_threshold": 10,
+            "storm_window_seconds": 60,
+            "cooldown_seconds": 300
+        }
+        return {**defaults, **self.data.get("opencode", {})}
+
 
 def create_example_config(output_path: Path):
     """Create an example configuration file.
@@ -276,6 +292,17 @@ anomaly_detection:
   stall_seconds: 300
   # Threshold for novelty detection (0.8 = 80% confidence)
   novelty_threshold: 0.8
+
+opencode:
+  # Enable OpenCode subprocess alerts for storm gating and /run commands
+  enabled: true
+  working_dir: "."
+  # How long to wait for opencode to finish analyzing
+  timeout_seconds: 120
+  # Alert storm detection (triggers opencode analysis if X alerts occur in Y seconds)
+  storm_threshold: 10
+  storm_window_seconds: 60
+  cooldown_seconds: 300
 
 monitors:
   # Monitor a log file
