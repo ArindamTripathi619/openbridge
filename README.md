@@ -2,7 +2,7 @@
 
 Minimal Telegram application that forwards a chat message to `opencode`, waits for the result, and sends the final output back to the same chat.
 
-The recommended workflow is the built-in setup wizard. It collects the bot token, model, working dir, timeout, allowed chat ids, log level, and optional decorated-output settings, then writes the config file for you.
+The recommended workflow is the built-in setup wizard. It collects the bot token, model, working dir, timeout, allowed chat ids, log level, and optional LLM settings for both input prompt enhancement and output prettification, then writes the config file for you.
 
 ## Quick Start
 
@@ -36,6 +36,16 @@ The wizard configures:
 - log level
 - optional decorated-output settings
 
+LLM stages:
+
+- Input LLM: rewrites raw Telegram prompts into better OpenCode prompts while preserving intent.
+- Output LLM: formats OpenCode results into concise Telegram-friendly sections.
+
+For each stage, the wizard lets you choose:
+
+- `litellm`: provide model name and port (default `8000`, OpenAI-compatible local gateway)
+- `api`: provide API key, model, and OpenAI-compatible base URL
+
 If you want to bootstrap from the shell for reference, [config/opencode-bridge.env.example](config/opencode-bridge.env.example) shows the same keys the wizard manages.
 
 If you want systemd supervision, use [config/telewatch.service.example](config/telewatch.service.example) as the starting point, or let `telewatch install-systemd` create the user unit for you.
@@ -43,11 +53,15 @@ If you want systemd supervision, use [config/telewatch.service.example](config/t
 Optional decorated output post-processor settings:
 
 ```bash
-export TELEWATCH_DECORATOR_ENABLED="1"
-export TELEWATCH_DECORATOR_API_KEY="sk-..."
-export TELEWATCH_DECORATOR_MODEL="your-free-model-name"
-export TELEWATCH_DECORATOR_BASE_URL="https://your-provider.example/v1"
-export TELEWATCH_DECORATOR_TIMEOUT_SECONDS="30"
+export TELEWATCH_INPUT_LLM_ENABLED="1"
+export TELEWATCH_INPUT_LLM_PROVIDER="litellm"
+export TELEWATCH_INPUT_LLM_MODEL="groq-gpt-oss-mini"
+export TELEWATCH_INPUT_LLM_LITELLM_PORT="8000"
+
+export TELEWATCH_OUTPUT_LLM_ENABLED="1"
+export TELEWATCH_OUTPUT_LLM_PROVIDER="litellm"
+export TELEWATCH_OUTPUT_LLM_MODEL="groq-gpt-oss-mini"
+export TELEWATCH_OUTPUT_LLM_LITELLM_PORT="8000"
 ```
 
 ## Run
@@ -117,6 +131,6 @@ Telegram commands available from the bot:
 - The bot is intentionally small and single-purpose.
 - This branch exposes the application and the bridge command.
 - If the configured model hits quota or rate limits, the bridge automatically retries with `opencode/minimax-m2.5-free` and then `opencode/nemotron-3-super-free`.
-- If the decorator is enabled and healthy, replies are reformatted into Telegram-friendly HTML sections.
+- If the output LLM is enabled and healthy, replies are reformatted into Telegram-friendly HTML sections.
 - `telewatch install-systemd` writes a user unit to `~/.config/systemd/user/telewatch.service` and enables it unless you pass `--no-enable`.
 - `telewatch uninstall-systemd` removes that user unit and reloads the user systemd daemon.

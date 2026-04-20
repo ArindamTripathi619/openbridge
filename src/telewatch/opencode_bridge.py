@@ -35,6 +35,8 @@ DEFAULT_FALLBACK_MODELS = (
     "opencode/nemotron-3-super-free",
 )
 DEFAULT_DECORATOR_TIMEOUT_SECONDS = 30
+DEFAULT_LITELLM_PORT = 8000
+DEFAULT_LITELLM_MODEL = "groq-gpt-oss-mini"
 SENSITIVE_LOG_PATTERNS = (
     re.compile(r"(https?://api\.telegram\.org/bot)(\d{6,12}:[A-Za-z0-9_-]+)(/)", re.IGNORECASE),
     re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{20,})\b"),
@@ -55,6 +57,20 @@ class BridgeConfig:
     decorator_model: Optional[str] = None
     decorator_base_url: Optional[str] = None
     decorator_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS
+    input_llm_enabled: bool = False
+    input_llm_provider: str = "none"
+    input_llm_api_key: Optional[str] = None
+    input_llm_model: Optional[str] = None
+    input_llm_base_url: Optional[str] = None
+    input_llm_litellm_port: int = DEFAULT_LITELLM_PORT
+    input_llm_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS
+    output_llm_enabled: bool = False
+    output_llm_provider: str = "none"
+    output_llm_api_key: Optional[str] = None
+    output_llm_model: Optional[str] = None
+    output_llm_base_url: Optional[str] = None
+    output_llm_litellm_port: int = DEFAULT_LITELLM_PORT
+    output_llm_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, str]) -> "BridgeConfig":
@@ -83,19 +99,41 @@ class BridgeConfig:
         if max_jobs <= 0:
             raise ValueError("OPENCODE_MAX_CONCURRENT must be > 0")
 
-        decorator_api_key = mapping.get("TELEWATCH_DECORATOR_API_KEY", "").strip() or None
-        decorator_model = mapping.get("TELEWATCH_DECORATOR_MODEL", "").strip() or None
-        decorator_base_url = mapping.get("TELEWATCH_DECORATOR_BASE_URL", "").strip() or None
-        decorator_timeout_seconds = int(
-            mapping.get("TELEWATCH_DECORATOR_TIMEOUT_SECONDS", str(DEFAULT_DECORATOR_TIMEOUT_SECONDS))
+        (
+            decorator_enabled,
+            decorator_api_key,
+            decorator_model,
+            decorator_base_url,
+            decorator_timeout_seconds,
+        ) = _parse_legacy_decorator_config(mapping)
+
+        (
+            input_llm_enabled,
+            input_llm_provider,
+            input_llm_api_key,
+            input_llm_model,
+            input_llm_base_url,
+            input_llm_litellm_port,
+            input_llm_timeout_seconds,
+        ) = _parse_llm_role_config(mapping, role="TELEWATCH_INPUT_LLM")
+
+        (
+            output_llm_enabled,
+            output_llm_provider,
+            output_llm_api_key,
+            output_llm_model,
+            output_llm_base_url,
+            output_llm_litellm_port,
+            output_llm_timeout_seconds,
+        ) = _parse_llm_role_config(
+            mapping,
+            role="TELEWATCH_OUTPUT_LLM",
+            legacy_enabled=decorator_enabled,
+            legacy_api_key=decorator_api_key,
+            legacy_model=decorator_model,
+            legacy_base_url=decorator_base_url,
+            legacy_timeout_seconds=decorator_timeout_seconds,
         )
-        decorator_enabled = _parse_bool(mapping.get("TELEWATCH_DECORATOR_ENABLED", "0"))
-        if decorator_api_key and decorator_model and decorator_base_url:
-            decorator_enabled = True
-        if decorator_enabled and (not decorator_api_key or not decorator_model or not decorator_base_url):
-            decorator_enabled = False
-        if decorator_timeout_seconds <= 0:
-            raise ValueError("TELEWATCH_DECORATOR_TIMEOUT_SECONDS must be > 0")
 
         return cls(
             telegram_token=token,
@@ -110,6 +148,20 @@ class BridgeConfig:
             decorator_model=decorator_model,
             decorator_base_url=decorator_base_url,
             decorator_timeout_seconds=decorator_timeout_seconds,
+            input_llm_enabled=input_llm_enabled,
+            input_llm_provider=input_llm_provider,
+            input_llm_api_key=input_llm_api_key,
+            input_llm_model=input_llm_model,
+            input_llm_base_url=input_llm_base_url,
+            input_llm_litellm_port=input_llm_litellm_port,
+            input_llm_timeout_seconds=input_llm_timeout_seconds,
+            output_llm_enabled=output_llm_enabled,
+            output_llm_provider=output_llm_provider,
+            output_llm_api_key=output_llm_api_key,
+            output_llm_model=output_llm_model,
+            output_llm_base_url=output_llm_base_url,
+            output_llm_litellm_port=output_llm_litellm_port,
+            output_llm_timeout_seconds=output_llm_timeout_seconds,
         )
 
     @classmethod
@@ -127,6 +179,92 @@ def _build_opencode_command(config: BridgeConfig, prompt: str) -> List[str]:
 
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_llm_provider(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered in {"api", "direct", "apikey", "api_key"}:
+        return "api"
+    if lowered == "litellm":
+        return "litellm"
+    return "none"
+
+
+def _parse_legacy_decorator_config(
+    mapping: Mapping[str, str],
+) -> tuple[bool, Optional[str], Optional[str], Optional[str], int]:
+    decorator_api_key = mapping.get("TELEWATCH_DECORATOR_API_KEY", "").strip() or None
+    decorator_model = mapping.get("TELEWATCH_DECORATOR_MODEL", "").strip() or None
+    decorator_base_url = mapping.get("TELEWATCH_DECORATOR_BASE_URL", "").strip() or None
+    decorator_timeout_seconds = int(
+        mapping.get("TELEWATCH_DECORATOR_TIMEOUT_SECONDS", str(DEFAULT_DECORATOR_TIMEOUT_SECONDS))
+    )
+    decorator_enabled = _parse_bool(mapping.get("TELEWATCH_DECORATOR_ENABLED", "0"))
+    if decorator_api_key and decorator_model and decorator_base_url:
+        decorator_enabled = True
+    if decorator_enabled and (not decorator_api_key or not decorator_model or not decorator_base_url):
+        decorator_enabled = False
+    if decorator_timeout_seconds <= 0:
+        raise ValueError("TELEWATCH_DECORATOR_TIMEOUT_SECONDS must be > 0")
+    return (
+        decorator_enabled,
+        decorator_api_key,
+        decorator_model,
+        decorator_base_url,
+        decorator_timeout_seconds,
+    )
+
+
+def _parse_llm_role_config(
+    mapping: Mapping[str, str],
+    *,
+    role: str,
+    legacy_enabled: bool = False,
+    legacy_api_key: Optional[str] = None,
+    legacy_model: Optional[str] = None,
+    legacy_base_url: Optional[str] = None,
+    legacy_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS,
+) -> tuple[bool, str, Optional[str], Optional[str], Optional[str], int, int]:
+    enabled = _parse_bool(mapping.get(f"{role}_ENABLED", "0"))
+    provider = _normalize_llm_provider(mapping.get(f"{role}_PROVIDER", ""))
+    api_key = mapping.get(f"{role}_API_KEY", "").strip() or None
+    model = mapping.get(f"{role}_MODEL", "").strip() or None
+    base_url = mapping.get(f"{role}_BASE_URL", "").strip() or None
+    litellm_port = int(mapping.get(f"{role}_LITELLM_PORT", str(DEFAULT_LITELLM_PORT)))
+    timeout_seconds = int(mapping.get(f"{role}_TIMEOUT_SECONDS", str(DEFAULT_DECORATOR_TIMEOUT_SECONDS)))
+
+    if role == "TELEWATCH_OUTPUT_LLM":
+        if not api_key:
+            api_key = legacy_api_key
+        if not model:
+            model = legacy_model
+        if not base_url:
+            base_url = legacy_base_url
+        if not _parse_bool(mapping.get(f"{role}_ENABLED", "0")) and legacy_enabled:
+            enabled = True
+        if f"{role}_TIMEOUT_SECONDS" not in mapping:
+            timeout_seconds = legacy_timeout_seconds
+
+    if timeout_seconds <= 0:
+        raise ValueError(f"{role}_TIMEOUT_SECONDS must be > 0")
+    if litellm_port <= 0:
+        raise ValueError(f"{role}_LITELLM_PORT must be > 0")
+
+    if provider == "none" and enabled:
+        if api_key and model and base_url:
+            provider = "api"
+        elif model:
+            provider = "litellm"
+
+    if provider == "api" and (not api_key or not model or not base_url):
+        enabled = False
+    elif provider == "litellm" and not model:
+        enabled = False
+
+    if provider == "none":
+        enabled = False
+
+    return enabled, provider, api_key, model, base_url, litellm_port, timeout_seconds
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -228,6 +366,8 @@ class OpenCodeBridge:
             "successful_requests": 0,
             "failed_requests": 0,
             "quota_fallbacks": 0,
+            "prompt_rewrites": 0,
+            "input_llm_failures": 0,
             "decorated_outputs": 0,
             "decorator_failures": 0,
             "last_model": None,
@@ -294,6 +434,102 @@ class OpenCodeBridge:
         self._stats["last_error"] = "OpenCode returned no output."
         self._stats["last_result_kind"] = "empty"
         return "OpenCode returned no output."
+
+    def _resolve_llm_runtime(self, stage: str) -> Optional[dict]:
+        if stage == "input":
+            enabled = self.config.input_llm_enabled
+            provider = self.config.input_llm_provider
+            model = self.config.input_llm_model
+            api_key = self.config.input_llm_api_key
+            base_url = self.config.input_llm_base_url
+            litellm_port = self.config.input_llm_litellm_port
+            timeout_seconds = self.config.input_llm_timeout_seconds
+        else:
+            enabled = self.config.output_llm_enabled
+            provider = self.config.output_llm_provider
+            model = self.config.output_llm_model
+            api_key = self.config.output_llm_api_key
+            base_url = self.config.output_llm_base_url
+            litellm_port = self.config.output_llm_litellm_port
+            timeout_seconds = self.config.output_llm_timeout_seconds
+
+            if not enabled and self.config.decorator_enabled:
+                enabled = True
+                provider = "api"
+                model = model or self.config.decorator_model
+                api_key = api_key or self.config.decorator_api_key
+                base_url = base_url or self.config.decorator_base_url
+                timeout_seconds = self.config.decorator_timeout_seconds
+
+        if not enabled or not model:
+            return None
+
+        if provider == "litellm":
+            return {
+                "model": model,
+                "api_key": api_key or "sk-local",
+                "base_url": f"http://localhost:{litellm_port}/v1",
+                "timeout_seconds": timeout_seconds,
+            }
+
+        if provider == "api" and api_key and base_url:
+            return {
+                "model": model,
+                "api_key": api_key,
+                "base_url": base_url,
+                "timeout_seconds": timeout_seconds,
+            }
+
+        return None
+
+    async def enhance_prompt(self, raw_prompt: str) -> str:
+        runtime = self._resolve_llm_runtime("input")
+        if not runtime:
+            return raw_prompt
+
+        try:
+            rewritten = await asyncio.to_thread(self._enhance_prompt_sync, runtime, raw_prompt)
+        except Exception:
+            self._stats["input_llm_failures"] += 1
+            logger.exception("Input LLM rewrite failed")
+            return raw_prompt
+
+        if not rewritten:
+            self._stats["input_llm_failures"] += 1
+            return raw_prompt
+
+        self._stats["prompt_rewrites"] += 1
+        return rewritten
+
+    def _enhance_prompt_sync(self, runtime: dict, raw_prompt: str) -> Optional[str]:
+        payload = {
+            "model": runtime["model"],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You rewrite user requests into high-signal prompts for OpenCode. "
+                        "Preserve intent, constraints, and expected output. "
+                        "Return plain text only, no markdown, no commentary."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": raw_prompt,
+                },
+            ],
+            "temperature": 0.1,
+        }
+
+        content = self._call_chat_completion(runtime, payload)
+        if not content:
+            return None
+
+        candidate = content.strip()
+        if not candidate:
+            return None
+
+        return candidate[:8000]
 
     def _is_error_result(self, text: str) -> bool:
         error_prefixes = (
@@ -362,12 +598,7 @@ class OpenCodeBridge:
         return cleaned
 
     def _is_decorated_output_enabled(self) -> bool:
-        return bool(
-            self.config.decorator_enabled
-            and self.config.decorator_api_key
-            and self.config.decorator_model
-            and self.config.decorator_base_url
-        )
+        return self._resolve_llm_runtime("output") is not None
 
     async def decorate_output(self, raw_output: str) -> Optional[List[str]]:
         if not self._is_decorated_output_enabled():
@@ -396,6 +627,10 @@ class OpenCodeBridge:
         return sections
 
     def _decorate_output_sync(self, raw_output: str) -> Optional[dict]:
+        runtime = self._resolve_llm_runtime("output")
+        if not runtime:
+            return None
+
         prompt = (
             "Transform the following OpenCode result into a concise Telegram-friendly JSON object. "
             "Return JSON only, with exactly these keys: title, summary, highlights, actions, warnings. "
@@ -406,7 +641,7 @@ class OpenCodeBridge:
         )
 
         payload = {
-            "model": self.config.decorator_model,
+            "model": runtime["model"],
             "messages": [
                 {
                     "role": "system",
@@ -417,27 +652,34 @@ class OpenCodeBridge:
             "temperature": 0.1,
         }
 
+        content = self._call_chat_completion(runtime, payload)
+        if not content:
+            return None
+
+        return self._parse_decorator_json(content)
+
+    def _call_chat_completion(self, runtime: dict, payload: dict) -> Optional[str]:
         request = Request(
-            url=f"{self.config.decorator_base_url.rstrip('/')}/chat/completions",
+            url=f"{str(runtime['base_url']).rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.config.decorator_api_key}",
+                "Authorization": f"Bearer {runtime['api_key']}",
             },
             method="POST",
         )
 
         try:
-            with urlopen(request, timeout=self.config.decorator_timeout_seconds) as response:
+            with urlopen(request, timeout=int(runtime["timeout_seconds"])) as response:
                 response_body = response.read().decode("utf-8", errors="replace")
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            logger.warning("Decorator request failed: %s", exc)
+            logger.warning("LLM request failed: %s", exc)
             return None
 
         try:
             response_json = json.loads(response_body)
         except json.JSONDecodeError:
-            logger.warning("Decorator response was not valid JSON")
+            logger.warning("LLM response was not valid JSON")
             return None
 
         choices = response_json.get("choices") or []
@@ -452,11 +694,7 @@ class OpenCodeBridge:
         if not isinstance(message, dict):
             return None
 
-        content = str(message.get("content") or "").strip()
-        if not content:
-            return None
-
-        return self._parse_decorator_json(content)
+        return str(message.get("content") or "").strip()
 
     def _parse_decorator_json(self, text: str) -> Optional[dict]:
         candidate = text.strip()
@@ -537,6 +775,7 @@ class OpenCodeBridge:
 
         allowed = "any chat" if not self.config.allowed_chat_ids else f"{len(self.config.allowed_chat_ids)} allowed chats"
         decorator_state = "enabled" if self._is_decorated_output_enabled() else "disabled"
+        input_llm_state = "enabled" if self._resolve_llm_runtime("input") else "disabled"
         model = self._stats.get("last_model") or self.config.opencode_model or "default"
         last_error = self._stats.get("last_error") or "none"
 
@@ -545,6 +784,7 @@ class OpenCodeBridge:
             f"Status: running",
             f"Uptime: {html.escape(uptime)}",
             f"OpenCode model: {html.escape(str(model))}",
+            f"Input LLM rewrite: {html.escape(input_llm_state)}",
             f"Output decoration: {html.escape(decorator_state)}",
             f"Chat access: {html.escape(allowed)}",
             f"Last result: {html.escape(str(self._stats.get('last_result_kind') or 'none'))}",
@@ -564,6 +804,8 @@ class OpenCodeBridge:
             f"Successful: {self._stats['successful_requests']}",
             f"Failed: {self._stats['failed_requests']}",
             f"Quota fallbacks: {self._stats['quota_fallbacks']}",
+            f"Prompt rewrites: {self._stats['prompt_rewrites']}",
+            f"Input LLM failures: {self._stats['input_llm_failures']}",
             f"Decorated outputs: {self._stats['decorated_outputs']}",
             f"Decorator failures: {self._stats['decorator_failures']}",
             f"Last model: {html.escape(str(self._stats.get('last_model') or 'none'))}",
@@ -584,6 +826,8 @@ class OpenCodeBridge:
         await update.effective_message.reply_text(
             "Usage:\n"
             "- Send plain text as a prompt\n"
+            "- Optional input LLM rewrites your prompt before OpenCode runs\n"
+            "- Optional output LLM prettifies OpenCode result for Telegram\n"
             "- /health shows runtime state\n"
             "- /stats shows request counters\n"
             "- Bot runs: opencode run [--model ...] <your prompt>\n"
@@ -626,7 +870,8 @@ class OpenCodeBridge:
         try:
             async with self._semaphore:
                 await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-                result = await self.run_prompt(prompt)
+                improved_prompt = await self.enhance_prompt(prompt)
+                result = await self.run_prompt(improved_prompt)
 
             decorated_chunks = await self.decorate_output(result)
             if decorated_chunks:

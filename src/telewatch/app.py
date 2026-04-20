@@ -28,6 +28,20 @@ CONFIG_KEYS = [
     "OPENCODE_MAX_CONCURRENT",
     "TELEGRAM_ALLOWED_CHAT_IDS",
     "LOG_LEVEL",
+    "TELEWATCH_INPUT_LLM_ENABLED",
+    "TELEWATCH_INPUT_LLM_PROVIDER",
+    "TELEWATCH_INPUT_LLM_API_KEY",
+    "TELEWATCH_INPUT_LLM_MODEL",
+    "TELEWATCH_INPUT_LLM_BASE_URL",
+    "TELEWATCH_INPUT_LLM_LITELLM_PORT",
+    "TELEWATCH_INPUT_LLM_TIMEOUT_SECONDS",
+    "TELEWATCH_OUTPUT_LLM_ENABLED",
+    "TELEWATCH_OUTPUT_LLM_PROVIDER",
+    "TELEWATCH_OUTPUT_LLM_API_KEY",
+    "TELEWATCH_OUTPUT_LLM_MODEL",
+    "TELEWATCH_OUTPUT_LLM_BASE_URL",
+    "TELEWATCH_OUTPUT_LLM_LITELLM_PORT",
+    "TELEWATCH_OUTPUT_LLM_TIMEOUT_SECONDS",
     "TELEWATCH_DECORATOR_ENABLED",
     "TELEWATCH_DECORATOR_API_KEY",
     "TELEWATCH_DECORATOR_MODEL",
@@ -36,8 +50,15 @@ CONFIG_KEYS = [
 ]
 
 
-def _prompt(message: str, default: Optional[str] = None, *, secret: bool = False) -> str:
-    suffix = f" [{default}]" if default else ""
+def _prompt(
+    message: str,
+    default: Optional[str] = None,
+    *,
+    secret: bool = False,
+    display_default: Optional[str] = None,
+) -> str:
+    visible_default = display_default if display_default is not None else default
+    suffix = f" [{visible_default}]" if visible_default else ""
     prompt_text = f"{message}{suffix}: "
     try:
         if secret:
@@ -226,7 +247,12 @@ def setup_command(_: argparse.Namespace) -> None:
     current = read_env_file(CONFIG_FILE)
     config: Dict[str, str] = {}
 
-    config["TELEGRAM_BOT_TOKEN"] = _prompt("Telegram bot token", current.get("TELEGRAM_BOT_TOKEN"), secret=True)
+    config["TELEGRAM_BOT_TOKEN"] = _prompt(
+        "Telegram bot token",
+        current.get("TELEGRAM_BOT_TOKEN"),
+        secret=True,
+        display_default="<hidden>",
+    )
     config["OPENCODE_MODEL"] = _prompt("OpenCode model", current.get("OPENCODE_MODEL", "opencode/big-pickle"))
     config["OPENCODE_WORKING_DIR"] = _prompt(
         "OpenCode working dir",
@@ -240,37 +266,84 @@ def setup_command(_: argparse.Namespace) -> None:
         "Max concurrent jobs",
         current.get("OPENCODE_MAX_CONCURRENT", "1"),
     )
+    config["LOG_LEVEL"] = _prompt("Log level", current.get("LOG_LEVEL", "INFO"))
+
+    def _chat_ids_default(value: str) -> str:
+        if not value.strip():
+            return ""
+        count = len([item for item in value.split(",") if item.strip()])
+        return f"<set:{count} id(s)>"
+
     config["TELEGRAM_ALLOWED_CHAT_IDS"] = _prompt(
         "Allowed chat ids (comma-separated, blank = allow all)",
         current.get("TELEGRAM_ALLOWED_CHAT_IDS", ""),
+        display_default=_chat_ids_default(current.get("TELEGRAM_ALLOWED_CHAT_IDS", "")),
     )
-    config["LOG_LEVEL"] = _prompt("Log level", current.get("LOG_LEVEL", "INFO"))
 
-    enable_decorator = _prompt(
-        "Enable decorated Telegram output? [y/N]",
-        "Y" if current.get("TELEWATCH_DECORATOR_ENABLED", "0") in {"1", "true", "yes", "on"} else "N",
-    ).lower()
-    if enable_decorator in {"y", "yes"}:
-        config["TELEWATCH_DECORATOR_ENABLED"] = "1"
-        config["TELEWATCH_DECORATOR_API_KEY"] = _prompt(
-            "Decorator API key",
-            current.get("TELEWATCH_DECORATOR_API_KEY", ""),
-            secret=True,
-        )
-        config["TELEWATCH_DECORATOR_MODEL"] = _prompt(
-            "Decorator model",
-            current.get("TELEWATCH_DECORATOR_MODEL", ""),
-        )
-        config["TELEWATCH_DECORATOR_BASE_URL"] = _prompt(
-            "Decorator base URL",
-            current.get("TELEWATCH_DECORATOR_BASE_URL", ""),
-        )
-        config["TELEWATCH_DECORATOR_TIMEOUT_SECONDS"] = _prompt(
-            "Decorator timeout seconds",
-            current.get("TELEWATCH_DECORATOR_TIMEOUT_SECONDS", "30"),
-        )
-    else:
-        config["TELEWATCH_DECORATOR_ENABLED"] = "0"
+    def configure_llm_role(prefix: str, label: str) -> None:
+        enabled_default = "Y" if current.get(f"{prefix}_ENABLED", "0") in {"1", "true", "yes", "on"} else "N"
+        enable = _prompt(f"Enable {label}? [y/N]", enabled_default).lower()
+        if enable not in {"y", "yes"}:
+            config[f"{prefix}_ENABLED"] = "0"
+            config[f"{prefix}_PROVIDER"] = "none"
+            return
+
+        config[f"{prefix}_ENABLED"] = "1"
+        provider_default = current.get(f"{prefix}_PROVIDER", "litellm") or "litellm"
+        provider = _prompt(
+            f"{label} provider [litellm/api]",
+            provider_default,
+        ).strip().lower()
+        if provider not in {"litellm", "api"}:
+            provider = "litellm"
+
+        config[f"{prefix}_PROVIDER"] = provider
+
+        if provider == "litellm":
+            config[f"{prefix}_MODEL"] = _prompt(
+                f"{label} model (LiteLLM)",
+                current.get(f"{prefix}_MODEL", "groq-gpt-oss-mini"),
+            )
+            config[f"{prefix}_LITELLM_PORT"] = _prompt(
+                f"{label} LiteLLM port",
+                current.get(f"{prefix}_LITELLM_PORT", "8000"),
+            )
+            config[f"{prefix}_TIMEOUT_SECONDS"] = _prompt(
+                f"{label} timeout seconds",
+                current.get(f"{prefix}_TIMEOUT_SECONDS", "30"),
+            )
+            config[f"{prefix}_API_KEY"] = current.get(f"{prefix}_API_KEY", "") or "sk-local"
+            config[f"{prefix}_BASE_URL"] = ""
+        else:
+            config[f"{prefix}_API_KEY"] = _prompt(
+                f"{label} API key",
+                current.get(f"{prefix}_API_KEY", ""),
+                secret=True,
+                display_default="<hidden>",
+            )
+            config[f"{prefix}_MODEL"] = _prompt(
+                f"{label} model",
+                current.get(f"{prefix}_MODEL", ""),
+            )
+            config[f"{prefix}_BASE_URL"] = _prompt(
+                f"{label} base URL",
+                current.get(f"{prefix}_BASE_URL", ""),
+            )
+            config[f"{prefix}_TIMEOUT_SECONDS"] = _prompt(
+                f"{label} timeout seconds",
+                current.get(f"{prefix}_TIMEOUT_SECONDS", "30"),
+            )
+            config[f"{prefix}_LITELLM_PORT"] = current.get(f"{prefix}_LITELLM_PORT", "8000")
+
+    configure_llm_role("TELEWATCH_INPUT_LLM", "input prompt enhancer")
+    configure_llm_role("TELEWATCH_OUTPUT_LLM", "output prettifier")
+
+    # Keep legacy decorator keys for backwards compatibility, but default them off in new setups.
+    config["TELEWATCH_DECORATOR_ENABLED"] = "0"
+    config["TELEWATCH_DECORATOR_API_KEY"] = ""
+    config["TELEWATCH_DECORATOR_MODEL"] = ""
+    config["TELEWATCH_DECORATOR_BASE_URL"] = ""
+    config["TELEWATCH_DECORATOR_TIMEOUT_SECONDS"] = "30"
 
     write_env_file(CONFIG_FILE, config)
     print(f"Saved configuration to {CONFIG_FILE}")

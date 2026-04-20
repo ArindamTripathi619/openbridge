@@ -88,6 +88,52 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
         self.assertTrue(any("Actions" in message for message in messages))
         self.assertTrue(any("Warnings" in message for message in messages))
 
+    def test_enhance_prompt_uses_input_llm_when_enabled(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+            input_llm_enabled=True,
+            input_llm_provider="litellm",
+            input_llm_model="groq-gpt-oss-mini",
+            input_llm_litellm_port=8000,
+        )
+        bridge = OpenCodeBridge(config)
+        bridge._enhance_prompt_sync = lambda runtime, raw: "Refined prompt for OpenCode"
+
+        enhanced = asyncio.run(bridge.enhance_prompt("raw user message"))
+
+        self.assertEqual(enhanced, "Refined prompt for OpenCode")
+
+    def test_enhance_prompt_falls_back_to_original_on_failure(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+            input_llm_enabled=True,
+            input_llm_provider="litellm",
+            input_llm_model="groq-gpt-oss-mini",
+            input_llm_litellm_port=8000,
+        )
+        bridge = OpenCodeBridge(config)
+
+        def _boom(runtime, raw):
+            raise RuntimeError("failed")
+
+        bridge._enhance_prompt_sync = _boom
+
+        enhanced = asyncio.run(bridge.enhance_prompt("original prompt"))
+
+        self.assertEqual(enhanced, "original prompt")
+
     def test_clean_opencode_output_strips_tool_noise(self):
         raw = """$ opencode run --model opencode/big-pickle "explain pid 112527"
 ✱ running tool: ps
