@@ -13,6 +13,7 @@ from src.telewatch.opencode_bridge import (
     _clean_opencode_output,
     _model_candidates,
     _redact_sensitive_text,
+    _split_gws_command,
 )
 
 
@@ -159,6 +160,49 @@ I'll investigate PID 112527 to see what it's doing.
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 3000 for chunk in chunks))
         self.assertEqual("".join(chunks), text)
+
+    def test_split_gws_command_handles_quotes(self):
+        parts = _split_gws_command("drive files list --params '{\"pageSize\":10}'")
+
+        self.assertEqual(parts[0:3], ["drive", "files", "list"])
+        self.assertEqual(parts[3], "--params")
+        self.assertEqual(parts[4], '{"pageSize":10}')
+
+    def test_run_gws_command_tracks_success(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+        bridge._run_gws_once = AsyncMock(return_value='{"ok":true}')
+
+        result = asyncio.run(bridge.run_gws_command("drive files list"))
+
+        self.assertEqual(result, '{"ok":true}')
+        self.assertEqual(bridge._stats["gws_requests"], 1)
+        self.assertEqual(bridge._stats["gws_successful_requests"], 1)
+
+    def test_run_gws_command_handles_empty(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        result = asyncio.run(bridge.run_gws_command(""))
+
+        self.assertIn("Invalid or empty gws command", result)
+        self.assertEqual(bridge._stats["gws_failed_requests"], 1)
 
 
 if __name__ == "__main__":

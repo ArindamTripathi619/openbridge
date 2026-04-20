@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ DEFAULT_FALLBACK_MODELS = (
 DEFAULT_DECORATOR_TIMEOUT_SECONDS = 30
 DEFAULT_LITELLM_PORT = 8000
 DEFAULT_LITELLM_MODEL = "groq-gpt-oss-mini"
+DEFAULT_GWS_TIMEOUT_SECONDS = 120
 SENSITIVE_LOG_PATTERNS = (
     re.compile(r"(https?://api\.telegram\.org/bot)(\d{6,12}:[A-Za-z0-9_-]+)(/)", re.IGNORECASE),
     re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{20,})\b"),
@@ -71,6 +73,8 @@ class BridgeConfig:
     output_llm_base_url: Optional[str] = None
     output_llm_litellm_port: int = DEFAULT_LITELLM_PORT
     output_llm_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS
+    gws_credentials_file: Optional[str] = None
+    gws_timeout_seconds: int = DEFAULT_GWS_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, str]) -> "BridgeConfig":
@@ -98,6 +102,10 @@ class BridgeConfig:
             raise ValueError("OPENCODE_TIMEOUT_SECONDS must be > 0")
         if max_jobs <= 0:
             raise ValueError("OPENCODE_MAX_CONCURRENT must be > 0")
+
+        gws_timeout_seconds = int(mapping.get("TELEWATCH_GWS_TIMEOUT_SECONDS", str(DEFAULT_GWS_TIMEOUT_SECONDS)))
+        if gws_timeout_seconds <= 0:
+            raise ValueError("TELEWATCH_GWS_TIMEOUT_SECONDS must be > 0")
 
         (
             decorator_enabled,
@@ -162,6 +170,8 @@ class BridgeConfig:
             output_llm_base_url=output_llm_base_url,
             output_llm_litellm_port=output_llm_litellm_port,
             output_llm_timeout_seconds=output_llm_timeout_seconds,
+            gws_credentials_file=mapping.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "").strip() or None,
+            gws_timeout_seconds=gws_timeout_seconds,
         )
 
     @classmethod
@@ -356,6 +366,13 @@ def _chunk_message(text: str, limit: int = SAFE_CHUNK) -> Iterable[str]:
         start = end
 
 
+def _split_gws_command(command_text: str) -> List[str]:
+    try:
+        return shlex.split(command_text)
+    except ValueError:
+        return []
+
+
 class OpenCodeBridge:
     def __init__(self, config: BridgeConfig):
         self.config = config
@@ -366,6 +383,9 @@ class OpenCodeBridge:
             "successful_requests": 0,
             "failed_requests": 0,
             "quota_fallbacks": 0,
+            "gws_requests": 0,
+            "gws_successful_requests": 0,
+            "gws_failed_requests": 0,
             "prompt_rewrites": 0,
             "input_llm_failures": 0,
             "decorated_outputs": 0,
@@ -434,6 +454,74 @@ class OpenCodeBridge:
         self._stats["last_error"] = "OpenCode returned no output."
         self._stats["last_result_kind"] = "empty"
         return "OpenCode returned no output."
+
+    async def run_gws_command(self, command_text: str) -> str:
+        self._stats["gws_requests"] += 1
+        self._stats["last_request_at"] = time.time()
+
+        parts = _split_gws_command(command_text)
+        if not parts:
+            self._stats["gws_failed_requests"] += 1
+            self._stats["last_result_kind"] = "gws-usage"
+            return (
+                "Invalid or empty gws command.\n"
+                "Use: !gws <subcommand> [args]\n"
+                "Example: !gws drive files list --params '{\"pageSize\":10}'"
+            )
+
+        result = await self._run_gws_once(parts)
+        if result.startswith("gws failed") or result.startswith("gws command timed out") or result.startswith(
+            "gws binary not found"
+        ):
+            self._stats["gws_failed_requests"] += 1
+            self._stats["failed_requests"] += 1
+            self._stats["last_error"] = result
+            self._stats["last_result_kind"] = "gws-error"
+            return result
+
+        self._stats["gws_successful_requests"] += 1
+        self._stats["successful_requests"] += 1
+        self._stats["last_success_at"] = time.time()
+        self._stats["last_error"] = None
+        self._stats["last_result_kind"] = "gws-success"
+        self._stats["last_model"] = "gws"
+        return result
+
+    async def _run_gws_once(self, parts: List[str]) -> str:
+        env = os.environ.copy()
+        if self.config.gws_credentials_file:
+            env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = self.config.gws_credentials_file
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "gws",
+                *parts,
+                cwd=self.config.opencode_working_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError:
+            return "gws binary not found in PATH. Install @googleworkspace/cli and retry."
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self.config.gws_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return f"gws command timed out after {self.config.gws_timeout_seconds}s."
+
+        out_text = stdout.decode("utf-8", errors="replace").strip()
+        err_text = stderr.decode("utf-8", errors="replace").strip()
+
+        if proc.returncode != 0:
+            detail = err_text or out_text or f"exit code {proc.returncode}"
+            return f"gws failed (exit={proc.returncode}):\n{detail}"
+
+        return out_text or err_text or "gws command completed with no output."
 
     def _resolve_llm_runtime(self, stage: str) -> Optional[dict]:
         if stage == "input":
@@ -784,6 +872,7 @@ class OpenCodeBridge:
             f"Status: running",
             f"Uptime: {html.escape(uptime)}",
             f"OpenCode model: {html.escape(str(model))}",
+            f"GWS credentials: {html.escape('configured' if self.config.gws_credentials_file else 'not set')}",
             f"Input LLM rewrite: {html.escape(input_llm_state)}",
             f"Output decoration: {html.escape(decorator_state)}",
             f"Chat access: {html.escape(allowed)}",
@@ -804,6 +893,9 @@ class OpenCodeBridge:
             f"Successful: {self._stats['successful_requests']}",
             f"Failed: {self._stats['failed_requests']}",
             f"Quota fallbacks: {self._stats['quota_fallbacks']}",
+            f"GWS requests: {self._stats['gws_requests']}",
+            f"GWS successful: {self._stats['gws_successful_requests']}",
+            f"GWS failed: {self._stats['gws_failed_requests']}",
             f"Prompt rewrites: {self._stats['prompt_rewrites']}",
             f"Input LLM failures: {self._stats['input_llm_failures']}",
             f"Decorated outputs: {self._stats['decorated_outputs']}",
@@ -826,13 +918,34 @@ class OpenCodeBridge:
         await update.effective_message.reply_text(
             "Usage:\n"
             "- Send plain text as a prompt\n"
+            "- Send !gws <command> to execute Google Workspace CLI directly\n"
+            "- Use /gws <command> for command style invocation\n"
             "- Optional input LLM rewrites your prompt before OpenCode runs\n"
             "- Optional output LLM prettifies OpenCode result for Telegram\n"
             "- /health shows runtime state\n"
             "- /stats shows request counters\n"
             "- Bot runs: opencode run [--model ...] <your prompt>\n"
-            "Config via env vars: TELEGRAM_BOT_TOKEN, OPENCODE_MODEL, OPENCODE_WORKING_DIR"
+            "Config via env vars: TELEGRAM_BOT_TOKEN, OPENCODE_MODEL, OPENCODE_WORKING_DIR, GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"
         )
+
+    async def handle_gws(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.effective_message or not update.effective_chat:
+            return
+
+        chat_id = update.effective_chat.id
+        if not self._is_chat_allowed(chat_id):
+            await update.effective_message.reply_text("This chat is not allowed to use this bot.")
+            return
+
+        command_text = " ".join(context.args or []).strip()
+        if not command_text:
+            await update.effective_message.reply_text(
+                "Usage: /gws <subcommand> [args]\nExample: /gws drive files list --params '{\"pageSize\":10}'"
+            )
+            return
+
+        await update.effective_message.reply_text("Request received. Running gws command...")
+        asyncio.create_task(self._run_gws_and_respond(chat_id, command_text, context.application))
 
     async def handle_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
@@ -863,8 +976,32 @@ class OpenCodeBridge:
             await update.effective_message.reply_text("Please send a non-empty prompt.")
             return
 
+        if prompt.lower().startswith("!gws"):
+            command_text = prompt[4:].strip()
+            if not command_text:
+                await update.effective_message.reply_text(
+                    "Usage: !gws <subcommand> [args]\nExample: !gws drive files list --params '{\"pageSize\":10}'"
+                )
+                return
+
+            await update.effective_message.reply_text("Request received. Running gws command...")
+            asyncio.create_task(self._run_gws_and_respond(chat_id, command_text, context.application))
+            return
+
         await update.effective_message.reply_text("Request received. Running OpenCode in background...")
         asyncio.create_task(self._run_and_respond(chat_id, prompt, context.application))
+
+    async def _send_result_messages(self, chat_id: int, result: str, app: Application) -> None:
+        decorated_chunks = await self.decorate_output(result)
+        if decorated_chunks:
+            for chunk in decorated_chunks:
+                await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+            return
+
+        for chunk in _chunk_message(result):
+            if len(chunk) > TELEGRAM_LIMIT:
+                chunk = chunk[:TELEGRAM_LIMIT]
+            await app.bot.send_message(chat_id=chat_id, text=chunk)
 
     async def _run_and_respond(self, chat_id: int, prompt: str, app: Application) -> None:
         try:
@@ -872,17 +1009,7 @@ class OpenCodeBridge:
                 await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
                 improved_prompt = await self.enhance_prompt(prompt)
                 result = await self.run_prompt(improved_prompt)
-
-            decorated_chunks = await self.decorate_output(result)
-            if decorated_chunks:
-                for chunk in decorated_chunks:
-                    await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
-                return
-
-            for chunk in _chunk_message(result):
-                if len(chunk) > TELEGRAM_LIMIT:
-                    chunk = chunk[:TELEGRAM_LIMIT]
-                await app.bot.send_message(chat_id=chat_id, text=chunk)
+            await self._send_result_messages(chat_id, result, app)
 
         except FileNotFoundError:
             await app.bot.send_message(
@@ -891,6 +1018,17 @@ class OpenCodeBridge:
             )
         except Exception as exc:  # broad guard to avoid silent task failures
             logger.exception("Failed to run OpenCode prompt")
+            await app.bot.send_message(chat_id=chat_id, text=f"Unexpected error: {exc}")
+
+    async def _run_gws_and_respond(self, chat_id: int, command_text: str, app: Application) -> None:
+        try:
+            async with self._semaphore:
+                await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                result = await self.run_gws_command(command_text)
+
+            await self._send_result_messages(chat_id, result, app)
+        except Exception as exc:
+            logger.exception("Failed to run gws command")
             await app.bot.send_message(chat_id=chat_id, text=f"Unexpected error: {exc}")
 
 
@@ -932,6 +1070,7 @@ def build_application(config: BridgeConfig) -> Application:
     app.add_handler(CommandHandler("help", bridge.handle_help))
     app.add_handler(CommandHandler("health", bridge.handle_health))
     app.add_handler(CommandHandler("stats", bridge.handle_stats))
+    app.add_handler(CommandHandler("gws", bridge.handle_gws))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.handle_text))
     app.add_error_handler(_handle_application_error)
     return app

@@ -26,6 +26,8 @@ CONFIG_KEYS = [
     "OPENCODE_WORKING_DIR",
     "OPENCODE_TIMEOUT_SECONDS",
     "OPENCODE_MAX_CONCURRENT",
+    "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+    "TELEWATCH_GWS_TIMEOUT_SECONDS",
     "TELEGRAM_ALLOWED_CHAT_IDS",
     "LOG_LEVEL",
     "TELEWATCH_INPUT_LLM_ENABLED",
@@ -265,6 +267,15 @@ def setup_command(_: argparse.Namespace) -> None:
     config["OPENCODE_MAX_CONCURRENT"] = _prompt(
         "Max concurrent jobs",
         current.get("OPENCODE_MAX_CONCURRENT", "1"),
+    )
+    config["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = _prompt(
+        "Google Workspace credentials file (optional for gws)",
+        current.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", ""),
+        display_default="<set>" if current.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "").strip() else "",
+    )
+    config["TELEWATCH_GWS_TIMEOUT_SECONDS"] = _prompt(
+        "gws timeout seconds",
+        current.get("TELEWATCH_GWS_TIMEOUT_SECONDS", "120"),
     )
     config["LOG_LEVEL"] = _prompt("Log level", current.get("LOG_LEVEL", "INFO"))
 

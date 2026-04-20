@@ -21,6 +21,8 @@ class TestAppConfig(unittest.TestCase):
                 "OPENCODE_WORKING_DIR": "/tmp/project",
                 "OPENCODE_TIMEOUT_SECONDS": "600",
                 "OPENCODE_MAX_CONCURRENT": "1",
+                "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE": "/tmp/workspace_credentials.json",
+                "TELEWATCH_GWS_TIMEOUT_SECONDS": "120",
                 "TELEGRAM_ALLOWED_CHAT_IDS": "123,456",
                 "LOG_LEVEL": "DEBUG",
                 "TELEWATCH_INPUT_LLM_ENABLED": "1",
@@ -36,6 +38,7 @@ class TestAppConfig(unittest.TestCase):
             self.assertEqual(loaded["TELEGRAM_ALLOWED_CHAT_IDS"], original["TELEGRAM_ALLOWED_CHAT_IDS"])
             self.assertEqual(loaded["LOG_LEVEL"], original["LOG_LEVEL"])
             self.assertEqual(loaded["TELEWATCH_INPUT_LLM_PROVIDER"], "litellm")
+            self.assertEqual(loaded["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"], "/tmp/workspace_credentials.json")
 
     def test_bridge_config_from_mapping(self):
         config = BridgeConfig.from_mapping(
@@ -45,6 +48,8 @@ class TestAppConfig(unittest.TestCase):
                 "OPENCODE_WORKING_DIR": "/tmp/project",
                 "OPENCODE_TIMEOUT_SECONDS": "600",
                 "OPENCODE_MAX_CONCURRENT": "1",
+                "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE": "/tmp/workspace_credentials.json",
+                "TELEWATCH_GWS_TIMEOUT_SECONDS": "150",
                 "TELEGRAM_ALLOWED_CHAT_IDS": "123,456",
                 "LOG_LEVEL": "info",
             }
@@ -55,6 +60,8 @@ class TestAppConfig(unittest.TestCase):
         self.assertEqual(config.opencode_working_dir, "/tmp/project")
         self.assertEqual(config.opencode_timeout_seconds, 600)
         self.assertEqual(config.max_concurrent_jobs, 1)
+        self.assertEqual(config.gws_credentials_file, "/tmp/workspace_credentials.json")
+        self.assertEqual(config.gws_timeout_seconds, 150)
         self.assertEqual(config.allowed_chat_ids, {123, 456})
         self.assertEqual(config.log_level, "INFO")
 

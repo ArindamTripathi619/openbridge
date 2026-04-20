@@ -43,6 +43,7 @@ config/*.yaml
 !config/example.yaml
 .env
 .env.*
+client_secret_*.json
 
 # Logs
 *.log
