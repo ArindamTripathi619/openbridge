@@ -19,6 +19,8 @@ PID_FILE = APP_DIR / "telewatch.pid"
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT_NAME = "telewatch.service"
 SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / SYSTEMD_UNIT_NAME
+OPENCODE_SYSTEMD_UNIT_NAME = "opencode.service"
+OPENCODE_SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / OPENCODE_SYSTEMD_UNIT_NAME
 
 CONFIG_KEYS = [
     "TELEGRAM_BOT_TOKEN",
@@ -26,8 +28,12 @@ CONFIG_KEYS = [
     "OPENCODE_WORKING_DIR",
     "OPENCODE_TIMEOUT_SECONDS",
     "OPENCODE_MAX_CONCURRENT",
-    "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
-    "TELEWATCH_GWS_TIMEOUT_SECONDS",
+    "OPENCODE_API_BASE_URL",
+    "OPENCODE_API_USERNAME",
+    "OPENCODE_API_PASSWORD",
+    "OPENCODE_API_TIMEOUT_SECONDS",
+    "OPENCODE_SERVER_USERNAME",
+    "OPENCODE_SERVER_PASSWORD",
     "TELEGRAM_ALLOWED_CHAT_IDS",
     "LOG_LEVEL",
     "TELEWATCH_INPUT_LLM_ENABLED",
@@ -174,7 +180,8 @@ def _build_systemd_unit(workspace_dir: Path) -> str:
         "[Unit]\n"
         "Description=TeleWatch Telegram OpenCode Bridge\n"
         "Wants=network-online.target\n"
-        "After=network-online.target\n\n"
+        "Wants=opencode.service\n"
+        "After=network-online.target opencode.service\n\n"
         "[Service]\n"
         "Type=simple\n"
         f"WorkingDirectory={workspace_dir}\n"
@@ -190,6 +197,78 @@ def _build_systemd_unit(workspace_dir: Path) -> str:
     )
 
 
+def _build_opencode_systemd_unit(workspace_dir: Path) -> str:
+    opencode_executable = shutil.which("opencode") or "opencode"
+
+    return (
+        "[Unit]\n"
+        "Description=OpenCode API Server\n"
+        "Wants=network-online.target\n"
+        "After=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"WorkingDirectory={workspace_dir}\n"
+        f"EnvironmentFile={CONFIG_FILE}\n"
+        f"ExecStart={opencode_executable} serve --hostname 127.0.0.1 --port 4096\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "StartLimitIntervalSec=60\n"
+        "StartLimitBurst=5\n"
+        "NoNewPrivileges=true\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _systemctl(*args: str, check: bool = True) -> None:
+    if shutil.which("systemctl") is None:
+        raise FileNotFoundError("systemctl not found")
+    subprocess.run(["systemctl", "--user", *args], check=check)
+
+
+def _install_opencode_systemd_unit(workspace_dir: Path) -> None:
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    OPENCODE_SYSTEMD_UNIT_FILE.write_text(_build_opencode_systemd_unit(workspace_dir), encoding="utf-8")
+
+
+def _ensure_opencode_service(workspace_dir: Path) -> None:
+    if not CONFIG_FILE.exists():
+        print(f"Config not found: {CONFIG_FILE}")
+        print("Run: telewatch setup")
+        raise SystemExit(1)
+
+    _install_opencode_systemd_unit(workspace_dir)
+
+    if shutil.which("systemctl") is None:
+        print("systemctl not found; cannot manage the OpenCode service automatically.")
+        print(f"Wrote {OPENCODE_SYSTEMD_UNIT_FILE}")
+        return
+
+    _systemctl("daemon-reload")
+    _systemctl("enable", OPENCODE_SYSTEMD_UNIT_NAME, check=False)
+    _systemctl("start", OPENCODE_SYSTEMD_UNIT_NAME)
+    print(f"Started {OPENCODE_SYSTEMD_UNIT_NAME}")
+
+
+def _ensure_opencode_running() -> None:
+    if shutil.which("systemctl") is None:
+        return
+
+    if not OPENCODE_SYSTEMD_UNIT_FILE.exists():
+        raise FileNotFoundError(
+            f"OpenCode service unit not found at {OPENCODE_SYSTEMD_UNIT_FILE}. Run telewatch setup first."
+        )
+
+    status = subprocess.run(
+        ["systemctl", "--user", "is-active", "--quiet", OPENCODE_SYSTEMD_UNIT_NAME],
+        check=False,
+    )
+    if status.returncode == 0:
+        return
+
+    _systemctl("start", OPENCODE_SYSTEMD_UNIT_NAME)
+
+
 def install_systemd_command(args: argparse.Namespace) -> None:
     workspace_dir = Path(args.workspace).resolve() if args.workspace else Path.cwd().resolve()
 
@@ -199,9 +278,10 @@ def install_systemd_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    _install_opencode_systemd_unit(workspace_dir)
     SYSTEMD_UNIT_FILE.write_text(_build_systemd_unit(workspace_dir), encoding="utf-8")
 
-    print(f"Installed systemd unit to {SYSTEMD_UNIT_FILE}")
+    print(f"Installed systemd units to {SYSTEMD_UNIT_FILE} and {OPENCODE_SYSTEMD_UNIT_FILE}")
 
     if shutil.which("systemctl") is None:
         print("systemctl not found; reload and enable the unit manually if needed.")
@@ -209,8 +289,11 @@ def install_systemd_command(args: argparse.Namespace) -> None:
 
     commands = [["systemctl", "--user", "daemon-reload"]]
     if not getattr(args, "no_enable", False):
+        commands.append(["systemctl", "--user", "enable", OPENCODE_SYSTEMD_UNIT_NAME])
+    if not getattr(args, "no_enable", False):
         commands.append(["systemctl", "--user", "enable", SYSTEMD_UNIT_NAME])
     if getattr(args, "start", False):
+        commands.append(["systemctl", "--user", "restart", OPENCODE_SYSTEMD_UNIT_NAME])
         commands.append(["systemctl", "--user", "restart", SYSTEMD_UNIT_NAME])
 
     for command in commands:
@@ -226,8 +309,10 @@ def install_systemd_command(args: argparse.Namespace) -> None:
 
 def uninstall_systemd_command(_: argparse.Namespace) -> None:
     unit_exists = SYSTEMD_UNIT_FILE.exists()
+    opencode_unit_exists = OPENCODE_SYSTEMD_UNIT_FILE.exists()
     if shutil.which("systemctl") is not None:
         subprocess.run(["systemctl", "--user", "disable", SYSTEMD_UNIT_NAME], check=False)
+        subprocess.run(["systemctl", "--user", "disable", OPENCODE_SYSTEMD_UNIT_NAME], check=False)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
 
     if unit_exists:
@@ -235,6 +320,12 @@ def uninstall_systemd_command(_: argparse.Namespace) -> None:
         print(f"Removed {SYSTEMD_UNIT_FILE}")
     else:
         print(f"No systemd unit found at {SYSTEMD_UNIT_FILE}")
+
+    if opencode_unit_exists:
+        OPENCODE_SYSTEMD_UNIT_FILE.unlink()
+        print(f"Removed {OPENCODE_SYSTEMD_UNIT_FILE}")
+    else:
+        print(f"No systemd unit found at {OPENCODE_SYSTEMD_UNIT_FILE}")
 
     if shutil.which("systemctl") is None:
         print("systemctl not found; remove the unit manually if needed.")
@@ -268,14 +359,33 @@ def setup_command(_: argparse.Namespace) -> None:
         "Max concurrent jobs",
         current.get("OPENCODE_MAX_CONCURRENT", "1"),
     )
-    config["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = _prompt(
-        "Google Workspace credentials file (optional for gws)",
-        current.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", ""),
-        display_default="<set>" if current.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "").strip() else "",
+    config["OPENCODE_API_BASE_URL"] = _prompt(
+        "OpenCode API base URL",
+        current.get("OPENCODE_API_BASE_URL", "http://127.0.0.1:4096"),
     )
-    config["TELEWATCH_GWS_TIMEOUT_SECONDS"] = _prompt(
-        "gws timeout seconds",
-        current.get("TELEWATCH_GWS_TIMEOUT_SECONDS", "120"),
+    config["OPENCODE_API_USERNAME"] = _prompt(
+        "OpenCode API username",
+        current.get("OPENCODE_API_USERNAME", "opencode"),
+    )
+    config["OPENCODE_API_PASSWORD"] = _prompt(
+        "OpenCode API password (optional)",
+        current.get("OPENCODE_API_PASSWORD", ""),
+        secret=True,
+        display_default="<hidden>" if current.get("OPENCODE_API_PASSWORD", "").strip() else "",
+    )
+    config["OPENCODE_API_TIMEOUT_SECONDS"] = _prompt(
+        "OpenCode API timeout seconds",
+        current.get("OPENCODE_API_TIMEOUT_SECONDS", "120"),
+    )
+    config["OPENCODE_SERVER_USERNAME"] = _prompt(
+        "OpenCode server username (optional)",
+        current.get("OPENCODE_SERVER_USERNAME", ""),
+    )
+    config["OPENCODE_SERVER_PASSWORD"] = _prompt(
+        "OpenCode server password (optional)",
+        current.get("OPENCODE_SERVER_PASSWORD", ""),
+        secret=True,
+        display_default="<hidden>" if current.get("OPENCODE_SERVER_PASSWORD", "").strip() else "",
     )
     config["LOG_LEVEL"] = _prompt("Log level", current.get("LOG_LEVEL", "INFO"))
 
@@ -359,6 +469,15 @@ def setup_command(_: argparse.Namespace) -> None:
     write_env_file(CONFIG_FILE, config)
     print(f"Saved configuration to {CONFIG_FILE}")
 
+    workspace_dir = Path(config["OPENCODE_WORKING_DIR"]).resolve()
+    if shutil.which("systemctl") is not None:
+        try:
+            _ensure_opencode_service(workspace_dir)
+        except Exception as exc:
+            print(f"Could not install or start the OpenCode systemd service: {exc}")
+    else:
+        print("systemctl not found; OpenCode service was not installed automatically.")
+
     start_now = _prompt("Start the app now? [Y/n]", "Y").lower()
     if start_now in {"", "y", "yes"}:
         start_command(argparse.Namespace(config=CONFIG_FILE, foreground=False, debug=False, log_level=None))
@@ -383,6 +502,18 @@ def start_command(args: argparse.Namespace) -> None:
         print(f"OpenCode working dir does not exist: {config.opencode_working_dir}")
         raise SystemExit(1)
 
+    if shutil.which("systemctl") is not None:
+        try:
+            if not OPENCODE_SYSTEMD_UNIT_FILE.exists():
+                _ensure_opencode_service(Path(config.opencode_working_dir).resolve())
+            else:
+                _ensure_opencode_running()
+        except Exception as exc:
+            print(f"Could not install or start OpenCode service: {exc}")
+            raise SystemExit(1)
+    else:
+        print("systemctl not found; assuming OpenCode server is already running.")
+
     if not getattr(args, "foreground", False):
         _daemonize(LOG_FILE)
         _write_pid()
@@ -394,10 +525,37 @@ def start_command(args: argparse.Namespace) -> None:
         run_bridge(config, foreground=True, log_file=LOG_FILE)
 
 
-def stop_command(_: argparse.Namespace) -> None:
+def stop_command(args: argparse.Namespace) -> None:
     pid = _load_pid()
+    force = getattr(args, "force", False)
+    
     if not pid:
+        if shutil.which("systemctl") is not None:
+            active = subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", SYSTEMD_UNIT_NAME],
+                check=False,
+            )
+            if active.returncode == 0:
+                subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME], check=True)
+                print(f"Stopped {SYSTEMD_UNIT_NAME}")
+                return
+
+        if force and shutil.which("pkill") is not None:
+            result = subprocess.run(
+                ["pkill", "-f", "telewatch start.*--foreground"],
+                check=False,
+            )
+            if result.returncode == 0:
+                print("Terminated foreground telewatch process(es)")
+                return
+            else:
+                print("No foreground process found with --force")
+                return
+
         print("No running background process found.")
+        print("If telewatch is running in foreground mode, stop it with Ctrl+C in that terminal.")
+        if shutil.which("pkill") is not None:
+            print("Or use: telewatch stop --force")
         return
 
     try:
@@ -433,6 +591,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.set_defaults(func=start_command)
 
     stop_parser = subparsers.add_parser("stop", help="Stop the background bridge")
+    stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force-terminate foreground processes (pkill -f 'telewatch start.*--foreground')",
+    )
     stop_parser.set_defaults(func=stop_command)
 
     status_parser = subparsers.add_parser("status", help="Show whether the bridge is running")

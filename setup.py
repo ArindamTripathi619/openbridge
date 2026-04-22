@@ -10,7 +10,7 @@ setup(
     name="telewatch",
     version="0.1.0",
     author="DevCrewX",
-    description="Telegram to opencode relay bot",
+    description="Telegram to OpenCode API relay bot",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/DevCrewX/TelegramRemoteProgressBot",
@@ -19,7 +19,7 @@ setup(
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
-        "Topic :: System :: Monitoring",
+        "Topic :: Communications :: Chat",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",

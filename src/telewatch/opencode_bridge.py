@@ -1,25 +1,26 @@
-"""Minimal Telegram -> OpenCode -> Telegram bridge.
+"""Minimal Telegram -> OpenCode API -> Telegram bridge.
 
-This module provides a barebones bot flow:
+This module provides a sessioned bot flow:
 1) receive text in Telegram
-2) run `opencode run ... <prompt>` in background
-3) send cleaned result back to Telegram chat
+2) call OpenCode server API for that chat session
+3) send result back to the same Telegram chat
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import json
 import logging
 import os
 import re
-import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Mapping, Optional, Set
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from telegram import Update
@@ -38,7 +39,8 @@ DEFAULT_FALLBACK_MODELS = (
 DEFAULT_DECORATOR_TIMEOUT_SECONDS = 30
 DEFAULT_LITELLM_PORT = 8000
 DEFAULT_LITELLM_MODEL = "groq-gpt-oss-mini"
-DEFAULT_GWS_TIMEOUT_SECONDS = 120
+DEFAULT_OPENCODE_API_BASE_URL = "http://127.0.0.1:4096"
+DEFAULT_OPENCODE_API_TIMEOUT_SECONDS = 120
 SENSITIVE_LOG_PATTERNS = (
     re.compile(r"(https?://api\.telegram\.org/bot)(\d{6,12}:[A-Za-z0-9_-]+)(/)", re.IGNORECASE),
     re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{20,})\b"),
@@ -73,8 +75,10 @@ class BridgeConfig:
     output_llm_base_url: Optional[str] = None
     output_llm_litellm_port: int = DEFAULT_LITELLM_PORT
     output_llm_timeout_seconds: int = DEFAULT_DECORATOR_TIMEOUT_SECONDS
-    gws_credentials_file: Optional[str] = None
-    gws_timeout_seconds: int = DEFAULT_GWS_TIMEOUT_SECONDS
+    opencode_api_base_url: str = DEFAULT_OPENCODE_API_BASE_URL
+    opencode_api_username: str = "opencode"
+    opencode_api_password: Optional[str] = None
+    opencode_api_timeout_seconds: int = DEFAULT_OPENCODE_API_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, str]) -> "BridgeConfig":
@@ -103,9 +107,17 @@ class BridgeConfig:
         if max_jobs <= 0:
             raise ValueError("OPENCODE_MAX_CONCURRENT must be > 0")
 
-        gws_timeout_seconds = int(mapping.get("TELEWATCH_GWS_TIMEOUT_SECONDS", str(DEFAULT_GWS_TIMEOUT_SECONDS)))
-        if gws_timeout_seconds <= 0:
-            raise ValueError("TELEWATCH_GWS_TIMEOUT_SECONDS must be > 0")
+        opencode_api_base_url = (
+            mapping.get("OPENCODE_API_BASE_URL", DEFAULT_OPENCODE_API_BASE_URL).strip()
+            or DEFAULT_OPENCODE_API_BASE_URL
+        )
+        opencode_api_username = mapping.get("OPENCODE_API_USERNAME", "opencode").strip() or "opencode"
+        opencode_api_password = mapping.get("OPENCODE_API_PASSWORD", "").strip() or None
+        opencode_api_timeout_seconds = int(
+            mapping.get("OPENCODE_API_TIMEOUT_SECONDS", str(DEFAULT_OPENCODE_API_TIMEOUT_SECONDS))
+        )
+        if opencode_api_timeout_seconds <= 0:
+            raise ValueError("OPENCODE_API_TIMEOUT_SECONDS must be > 0")
 
         (
             decorator_enabled,
@@ -170,21 +182,15 @@ class BridgeConfig:
             output_llm_base_url=output_llm_base_url,
             output_llm_litellm_port=output_llm_litellm_port,
             output_llm_timeout_seconds=output_llm_timeout_seconds,
-            gws_credentials_file=mapping.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE", "").strip() or None,
-            gws_timeout_seconds=gws_timeout_seconds,
+            opencode_api_base_url=opencode_api_base_url,
+            opencode_api_username=opencode_api_username,
+            opencode_api_password=opencode_api_password,
+            opencode_api_timeout_seconds=opencode_api_timeout_seconds,
         )
 
     @classmethod
     def from_env(cls) -> "BridgeConfig":
         return cls.from_mapping(os.environ)
-
-
-def _build_opencode_command(config: BridgeConfig, prompt: str) -> List[str]:
-    cmd = ["opencode", "run"]
-    if config.opencode_model:
-        cmd.extend(["--model", config.opencode_model])
-    cmd.append(prompt)
-    return cmd
 
 
 def _parse_bool(value: str) -> bool:
@@ -290,62 +296,6 @@ class RedactingFormatter(logging.Formatter):
         return _redact_sensitive_text(rendered)
 
 
-def _is_quota_error(text: str) -> bool:
-    lowered = text.lower()
-    quota_markers = (
-        "quota",
-        "rate limit",
-        "rate-limit",
-        "insufficient credits",
-        "billing",
-        "429",
-        "limit exceeded",
-        "too many requests",
-        "free tier exhausted",
-    )
-    return any(marker in lowered for marker in quota_markers)
-
-
-def _model_candidates(primary_model: Optional[str]) -> List[Optional[str]]:
-    candidates: List[Optional[str]] = []
-    for model in (primary_model, *DEFAULT_FALLBACK_MODELS):
-        if model and model not in candidates:
-            candidates.append(model)
-    if not candidates:
-        candidates.append(None)
-    return candidates
-
-
-def _clean_opencode_output(output: str) -> str:
-    """Strip noisy tool-call lines and keep user-facing final text."""
-    lines = output.splitlines()
-    in_cmd = False
-    buffer: List[str] = []
-
-    for line in lines:
-        if re.match(r"^[\s]*\$", line):
-            in_cmd = True
-            buffer = []
-            continue
-
-        if re.match(r"^[✱✗!]", line) or line.startswith("DEBUG:") or line.startswith("> "):
-            buffer = []
-            continue
-
-        if in_cmd and re.match(r"^[\s]*$", line):
-            in_cmd = False
-            continue
-
-        if not in_cmd:
-            buffer.append(line)
-
-    cleaned = "\n".join(buffer).strip()
-    if cleaned:
-        return cleaned
-
-    return output.strip() or "OpenCode returned no output."
-
-
 def _chunk_message(text: str, limit: int = SAFE_CHUNK) -> Iterable[str]:
     if len(text) <= limit:
         yield text
@@ -366,11 +316,73 @@ def _chunk_message(text: str, limit: int = SAFE_CHUNK) -> Iterable[str]:
         start = end
 
 
-def _split_gws_command(command_text: str) -> List[str]:
-    try:
-        return shlex.split(command_text)
-    except ValueError:
-        return []
+def _extract_session_id(payload: object) -> Optional[str]:
+    if isinstance(payload, dict):
+        for key in ("id", "sessionId", "session_id"):
+            value = payload.get(key)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return str(value)
+
+        for nested_key in ("data", "result", "session"):
+            nested = payload.get(nested_key)
+            value = _extract_session_id(nested)
+            if value:
+                return value
+
+    if isinstance(payload, list):
+        for item in payload:
+            value = _extract_session_id(item)
+            if value:
+                return value
+    return None
+
+
+def _extract_text_candidates(payload: object) -> List[str]:
+    candidates: List[str] = []
+
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text:
+            candidates.append(text)
+        return candidates
+
+    if isinstance(payload, dict):
+        # Handle part payloads explicitly (common in OpenCode API messages).
+        part_type = str(payload.get("type") or "").lower()
+        if part_type in {"text", "input_text", "output_text"}:
+            for text_key in ("text", "content", "value"):
+                if text_key in payload:
+                    candidates.extend(_extract_text_candidates(payload.get(text_key)))
+
+        # Prefer assistant-like roles if available.
+        role = str(payload.get("role") or payload.get("type") or "").lower()
+        if role in {"assistant", "ai", "response"}:
+            for key in ("content", "text", "message", "output", "response"):
+                if key in payload:
+                    candidates.extend(_extract_text_candidates(payload.get(key)))
+
+        for key in (
+            "content",
+            "text",
+            "message",
+            "output",
+            "response",
+            "messages",
+            "items",
+            "parts",
+            "data",
+            "result",
+            "choices",
+        ):
+            if key in payload:
+                candidates.extend(_extract_text_candidates(payload.get(key)))
+        return candidates
+
+    if isinstance(payload, list):
+        for item in payload:
+            candidates.extend(_extract_text_candidates(item))
+
+    return [item for item in candidates if item.strip()]
 
 
 class OpenCodeBridge:
@@ -382,10 +394,6 @@ class OpenCodeBridge:
             "requests": 0,
             "successful_requests": 0,
             "failed_requests": 0,
-            "quota_fallbacks": 0,
-            "gws_requests": 0,
-            "gws_successful_requests": 0,
-            "gws_failed_requests": 0,
             "prompt_rewrites": 0,
             "input_llm_failures": 0,
             "decorated_outputs": 0,
@@ -396,132 +404,163 @@ class OpenCodeBridge:
             "last_success_at": None,
             "last_result_kind": None,
         }
+        self._chat_sessions: dict[int, str] = {}
+        self._session_lock = asyncio.Lock()
 
-    async def run_prompt(self, prompt: str) -> str:
+    async def run_prompt(self, chat_id: int, prompt: str) -> str:
         self._stats["requests"] += 1
         self._stats["last_request_at"] = time.time()
-        last_quota_error = ""
-
-        for model in _model_candidates(self.config.opencode_model):
-            attempt_config = BridgeConfig(
-                telegram_token=self.config.telegram_token,
-                opencode_model=model,
-                opencode_working_dir=self.config.opencode_working_dir,
-                opencode_timeout_seconds=self.config.opencode_timeout_seconds,
-                max_concurrent_jobs=self.config.max_concurrent_jobs,
-                allowed_chat_ids=self.config.allowed_chat_ids,
-                log_level=self.config.log_level,
-            )
-
-            result = await self._run_prompt_once(attempt_config, prompt)
-            if result is None:
-                continue
-
-            if result.startswith("__QUOTA__:"):
-                last_quota_error = result[len("__QUOTA__:") :].strip()
-                self._stats["quota_fallbacks"] += 1
-                self._stats["last_model"] = model or "default"
-                logger.warning(
-                    "OpenCode quota hit for model %s; trying fallback if available",
-                    model or "default",
-                )
-                continue
-
-            self._stats["last_model"] = model or "default"
-            if self._is_error_result(result):
-                self._stats["failed_requests"] += 1
-                self._stats["last_error"] = result
-                self._stats["last_result_kind"] = "error"
-            else:
-                self._stats["successful_requests"] += 1
-                self._stats["last_success_at"] = time.time()
-                self._stats["last_error"] = None
-                self._stats["last_result_kind"] = "success"
-
-            return result
-
-        if last_quota_error:
+        try:
+            session_id = await self._get_or_create_session(chat_id)
+        except Exception as exc:
             self._stats["failed_requests"] += 1
-            self._stats["last_error"] = last_quota_error
-            self._stats["last_result_kind"] = "quota"
-            return (
-                "All configured OpenCode models appear to be quota-limited or rate-limited right now. "
-                "Tried the primary model and free fallbacks.\n"
-                f"\n{last_quota_error}"
-            )
+            self._stats["last_error"] = str(exc)
+            self._stats["last_result_kind"] = "session-error"
+            return f"OpenCode API session error: {exc}"
 
-        self._stats["failed_requests"] += 1
-        self._stats["last_error"] = "OpenCode returned no output."
-        self._stats["last_result_kind"] = "empty"
-        return "OpenCode returned no output."
+        try:
+            result = await asyncio.to_thread(self._run_prompt_via_api_sync, session_id, prompt)
+        except Exception as exc:
+            self._stats["failed_requests"] += 1
+            self._stats["last_error"] = str(exc)
+            self._stats["last_result_kind"] = "api-error"
+            return f"OpenCode API request failed: {exc}"
 
-    async def run_gws_command(self, command_text: str) -> str:
-        self._stats["gws_requests"] += 1
-        self._stats["last_request_at"] = time.time()
-
-        parts = _split_gws_command(command_text)
-        if not parts:
-            self._stats["gws_failed_requests"] += 1
-            self._stats["last_result_kind"] = "gws-usage"
-            return (
-                "Invalid or empty gws command.\n"
-                "Use: !gws <subcommand> [args]\n"
-                "Example: !gws drive files list --params '{\"pageSize\":10}'"
-            )
-
-        result = await self._run_gws_once(parts)
-        if result.startswith("gws failed") or result.startswith("gws command timed out") or result.startswith(
-            "gws binary not found"
-        ):
-            self._stats["gws_failed_requests"] += 1
+        self._stats["last_model"] = self.config.opencode_model or "default"
+        if self._is_error_result(result):
             self._stats["failed_requests"] += 1
             self._stats["last_error"] = result
-            self._stats["last_result_kind"] = "gws-error"
-            return result
+            self._stats["last_result_kind"] = "error"
+        else:
+            self._stats["successful_requests"] += 1
+            self._stats["last_success_at"] = time.time()
+            self._stats["last_error"] = None
+            self._stats["last_result_kind"] = "success"
 
-        self._stats["gws_successful_requests"] += 1
-        self._stats["successful_requests"] += 1
-        self._stats["last_success_at"] = time.time()
-        self._stats["last_error"] = None
-        self._stats["last_result_kind"] = "gws-success"
-        self._stats["last_model"] = "gws"
         return result
 
-    async def _run_gws_once(self, parts: List[str]) -> str:
-        env = os.environ.copy()
-        if self.config.gws_credentials_file:
-            env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = self.config.gws_credentials_file
+    async def _get_or_create_session(self, chat_id: int) -> str:
+        existing = self._chat_sessions.get(chat_id)
+        if existing:
+            return existing
+
+        async with self._session_lock:
+            existing = self._chat_sessions.get(chat_id)
+            if existing:
+                return existing
+
+            session_id = await asyncio.to_thread(self._create_session_sync)
+            self._chat_sessions[chat_id] = session_id
+            return session_id
+
+    def _create_session_sync(self) -> str:
+        payload = self._opencode_request_sync("POST", "/session", payload={})
+        session_id = _extract_session_id(payload)
+        if not session_id:
+            raise RuntimeError("OpenCode API did not return a session id")
+        return session_id
+
+    def _run_prompt_via_api_sync(self, session_id: str, prompt: str) -> str:
+        started_at = time.time()
+        logger.debug("OpenCode request start: session=%s prompt_len=%d", session_id, len(prompt))
+        before_messages = self._fetch_session_messages_sync(session_id)
+        before_snapshot = set(_extract_text_candidates(before_messages))
+
+        immediate = self._send_session_message_sync(session_id, prompt)
+        if immediate and immediate not in before_snapshot and immediate.strip() != prompt.strip():
+            elapsed = time.time() - started_at
+            logger.debug("OpenCode immediate response in %.2fs", elapsed)
+            return immediate
+
+        deadline = time.time() + self.config.opencode_timeout_seconds
+        poll_count = 0
+        while time.time() < deadline:
+            time.sleep(1.0)
+            poll_count += 1
+            current = self._fetch_session_messages_sync(session_id)
+            candidates = _extract_text_candidates(current)
+            for candidate in reversed(candidates):
+                if candidate not in before_snapshot and candidate.strip() and candidate.strip() != prompt.strip():
+                    elapsed = time.time() - started_at
+                    logger.debug("OpenCode response received in %.2fs after %d polls", elapsed, poll_count)
+                    return candidate
+
+            if poll_count % 10 == 0:
+                elapsed = time.time() - started_at
+                logger.debug("OpenCode still waiting: %.2fs elapsed (%d polls)", elapsed, poll_count)
+
+        elapsed = time.time() - started_at
+        logger.warning("OpenCode response timeout after %.2fs (%d polls)", elapsed, poll_count)
+        return (
+            "OpenCode API timed out waiting for a response. "
+            f"Try a smaller prompt or increase OPENCODE_TIMEOUT_SECONDS (current: {self.config.opencode_timeout_seconds})."
+        )
+
+    def _send_session_message_sync(self, session_id: str, prompt: str) -> Optional[str]:
+        encoded_session = quote(session_id, safe="")
+        payload_variants = [
+            {"parts": [{"type": "text", "text": prompt}]},
+            {"parts": [{"text": prompt}]},
+            {"parts": [prompt]},
+            {"content": prompt},
+            {"message": prompt},
+            {"text": prompt},
+        ]
+
+        last_error: Optional[Exception] = None
+        for payload in payload_variants:
+            try:
+                response = self._opencode_request_sync(
+                    "POST",
+                    f"/session/{encoded_session}/message",
+                    payload=payload,
+                )
+                candidates = _extract_text_candidates(response)
+                if candidates:
+                    return candidates[-1]
+                return None
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        return None
+
+    def _fetch_session_messages_sync(self, session_id: str) -> object:
+        encoded_session = quote(session_id, safe="")
+        return self._opencode_request_sync("GET", f"/session/{encoded_session}/message")
+
+    def _opencode_request_sync(self, method: str, path: str, payload: Optional[dict] = None) -> object:
+        base_url = self.config.opencode_api_base_url.rstrip("/")
+        url = f"{base_url}{path}"
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        if self.config.opencode_api_password:
+            raw = f"{self.config.opencode_api_username}:{self.config.opencode_api_password}".encode("utf-8")
+            headers["Authorization"] = f"Basic {base64.b64encode(raw).decode('ascii')}"
+
+        request = Request(url=url, data=body, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=self.config.opencode_api_timeout_seconds) as response:
+                response_body = response.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = str(exc)
+            raise RuntimeError(f"OpenCode API HTTP {exc.code}: {detail}") from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"OpenCode API request error: {exc}") from exc
+
+        if not response_body.strip():
+            return {}
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "gws",
-                *parts,
-                cwd=self.config.opencode_working_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-        except FileNotFoundError:
-            return "gws binary not found in PATH. Install @googleworkspace/cli and retry."
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=self.config.gws_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return f"gws command timed out after {self.config.gws_timeout_seconds}s."
-
-        out_text = stdout.decode("utf-8", errors="replace").strip()
-        err_text = stderr.decode("utf-8", errors="replace").strip()
-
-        if proc.returncode != 0:
-            detail = err_text or out_text or f"exit code {proc.returncode}"
-            return f"gws failed (exit={proc.returncode}):\n{detail}"
-
-        return out_text or err_text or "gws command completed with no output."
+            return json.loads(response_body)
+        except json.JSONDecodeError:
+            return {"text": response_body}
 
     def _resolve_llm_runtime(self, stage: str) -> Optional[dict]:
         if stage == "input":
@@ -621,69 +660,18 @@ class OpenCodeBridge:
 
     def _is_error_result(self, text: str) -> bool:
         error_prefixes = (
-            "OpenCode timed out.",
+            "OpenCode API timed out",
+            "OpenCode API HTTP",
+            "OpenCode API request failed",
+            "OpenCode API request error",
+            "OpenCode API session error",
             "OpenCode failed",
             "OpenCode could not use",
             "OpenCode rejected",
-            "All configured OpenCode models",
-            "opencode binary not found",
+            "OpenCode API did not return a session id",
             "OpenCode returned no output.",
         )
         return text.startswith(error_prefixes)
-
-    async def _run_prompt_once(self, config: BridgeConfig, prompt: str) -> Optional[str]:
-        cmd = _build_opencode_command(config, prompt)
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=config.opencode_working_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=config.opencode_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return (
-                "OpenCode timed out. "
-                f"Try a smaller prompt or increase OPENCODE_TIMEOUT_SECONDS (current: {config.opencode_timeout_seconds})."
-            )
-
-        out_text = stdout.decode("utf-8", errors="replace")
-        err_text = stderr.decode("utf-8", errors="replace").strip()
-
-        cleaned = _clean_opencode_output(out_text)
-        if proc.returncode != 0:
-            if _is_quota_error(err_text + "\n" + cleaned):
-                return f"__QUOTA__:{err_text or cleaned or f'OpenCode failed with exit code {proc.returncode}.'}"
-
-            if "insufficient permissions" in err_text.lower() or "forbidden" in err_text.lower():
-                return (
-                    "OpenCode could not use the configured model because of a permission/configuration error. "
-                    "Try unsetting OPENCODE_MODEL or updating your OpenCode provider permissions.\n"
-                    f"\n{err_text}"
-                )
-
-            if "opencode run [message..]" in err_text.lower() or "usage:" in err_text.lower():
-                return (
-                    "OpenCode rejected the command line arguments. The bridge now uses the supported current CLI format, "
-                    "so this usually means the local OpenCode install is out of sync or missing.\n"
-                    f"\n{err_text}"
-                )
-
-            if err_text:
-                return f"OpenCode failed (exit={proc.returncode}):\n{err_text}"
-            return f"OpenCode failed with exit code {proc.returncode}."
-
-        if err_text and "warning" in err_text.lower():
-            logger.warning("OpenCode warning: %s", err_text)
-
-        return cleaned
 
     def _is_decorated_output_enabled(self) -> bool:
         return self._resolve_llm_runtime("output") is not None
@@ -872,7 +860,8 @@ class OpenCodeBridge:
             f"Status: running",
             f"Uptime: {html.escape(uptime)}",
             f"OpenCode model: {html.escape(str(model))}",
-            f"GWS credentials: {html.escape('configured' if self.config.gws_credentials_file else 'not set')}",
+            f"OpenCode API: {html.escape(self.config.opencode_api_base_url)}",
+            f"Active sessions: {len(self._chat_sessions)}",
             f"Input LLM rewrite: {html.escape(input_llm_state)}",
             f"Output decoration: {html.escape(decorator_state)}",
             f"Chat access: {html.escape(allowed)}",
@@ -892,10 +881,6 @@ class OpenCodeBridge:
             f"Requests: {self._stats['requests']}",
             f"Successful: {self._stats['successful_requests']}",
             f"Failed: {self._stats['failed_requests']}",
-            f"Quota fallbacks: {self._stats['quota_fallbacks']}",
-            f"GWS requests: {self._stats['gws_requests']}",
-            f"GWS successful: {self._stats['gws_successful_requests']}",
-            f"GWS failed: {self._stats['gws_failed_requests']}",
             f"Prompt rewrites: {self._stats['prompt_rewrites']}",
             f"Input LLM failures: {self._stats['input_llm_failures']}",
             f"Decorated outputs: {self._stats['decorated_outputs']}",
@@ -918,34 +903,13 @@ class OpenCodeBridge:
         await update.effective_message.reply_text(
             "Usage:\n"
             "- Send plain text as a prompt\n"
-            "- Send !gws <command> to execute Google Workspace CLI directly\n"
-            "- Use /gws <command> for command style invocation\n"
             "- Optional input LLM rewrites your prompt before OpenCode runs\n"
             "- Optional output LLM prettifies OpenCode result for Telegram\n"
             "- /health shows runtime state\n"
             "- /stats shows request counters\n"
-            "- Bot runs: opencode run [--model ...] <your prompt>\n"
-            "Config via env vars: TELEGRAM_BOT_TOKEN, OPENCODE_MODEL, OPENCODE_WORKING_DIR, GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"
+            "- Bot uses opencode serve API and keeps one session per chat\n"
+            "Config via env vars: TELEGRAM_BOT_TOKEN, OPENCODE_API_BASE_URL, OPENCODE_API_PASSWORD"
         )
-
-    async def handle_gws(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_message or not update.effective_chat:
-            return
-
-        chat_id = update.effective_chat.id
-        if not self._is_chat_allowed(chat_id):
-            await update.effective_message.reply_text("This chat is not allowed to use this bot.")
-            return
-
-        command_text = " ".join(context.args or []).strip()
-        if not command_text:
-            await update.effective_message.reply_text(
-                "Usage: /gws <subcommand> [args]\nExample: /gws drive files list --params '{\"pageSize\":10}'"
-            )
-            return
-
-        await update.effective_message.reply_text("Request received. Running gws command...")
-        asyncio.create_task(self._run_gws_and_respond(chat_id, command_text, context.application))
 
     async def handle_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
@@ -976,19 +940,7 @@ class OpenCodeBridge:
             await update.effective_message.reply_text("Please send a non-empty prompt.")
             return
 
-        if prompt.lower().startswith("!gws"):
-            command_text = prompt[4:].strip()
-            if not command_text:
-                await update.effective_message.reply_text(
-                    "Usage: !gws <subcommand> [args]\nExample: !gws drive files list --params '{\"pageSize\":10}'"
-                )
-                return
-
-            await update.effective_message.reply_text("Request received. Running gws command...")
-            asyncio.create_task(self._run_gws_and_respond(chat_id, command_text, context.application))
-            return
-
-        await update.effective_message.reply_text("Request received. Running OpenCode in background...")
+        await update.effective_message.reply_text("Request received. Sending to OpenCode API...")
         asyncio.create_task(self._run_and_respond(chat_id, prompt, context.application))
 
     async def _send_result_messages(self, chat_id: int, result: str, app: Application) -> None:
@@ -1008,27 +960,11 @@ class OpenCodeBridge:
             async with self._semaphore:
                 await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
                 improved_prompt = await self.enhance_prompt(prompt)
-                result = await self.run_prompt(improved_prompt)
+                result = await self.run_prompt(chat_id, improved_prompt)
             await self._send_result_messages(chat_id, result, app)
 
-        except FileNotFoundError:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text="opencode binary not found in PATH. Install OpenCode and retry.",
-            )
         except Exception as exc:  # broad guard to avoid silent task failures
             logger.exception("Failed to run OpenCode prompt")
-            await app.bot.send_message(chat_id=chat_id, text=f"Unexpected error: {exc}")
-
-    async def _run_gws_and_respond(self, chat_id: int, command_text: str, app: Application) -> None:
-        try:
-            async with self._semaphore:
-                await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-                result = await self.run_gws_command(command_text)
-
-            await self._send_result_messages(chat_id, result, app)
-        except Exception as exc:
-            logger.exception("Failed to run gws command")
             await app.bot.send_message(chat_id=chat_id, text=f"Unexpected error: {exc}")
 
 
@@ -1070,7 +1006,6 @@ def build_application(config: BridgeConfig) -> Application:
     app.add_handler(CommandHandler("help", bridge.handle_help))
     app.add_handler(CommandHandler("health", bridge.handle_health))
     app.add_handler(CommandHandler("stats", bridge.handle_stats))
-    app.add_handler(CommandHandler("gws", bridge.handle_gws))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bridge.handle_text))
     app.add_error_handler(_handle_application_error)
     return app

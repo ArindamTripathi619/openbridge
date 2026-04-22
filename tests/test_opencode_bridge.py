@@ -10,23 +10,14 @@ from src.telewatch.opencode_bridge import (
     BridgeConfig,
     OpenCodeBridge,
     _chunk_message,
-    _clean_opencode_output,
-    _model_candidates,
+    _extract_session_id,
+    _extract_text_candidates,
     _redact_sensitive_text,
-    _split_gws_command,
 )
 
 
 class TestOpenCodeBridgeHelpers(unittest.TestCase):
-    def test_model_candidates_keep_primary_first(self):
-        candidates = _model_candidates("opencode/big-pickle")
-
-        self.assertEqual(
-            candidates,
-            ["opencode/big-pickle", "opencode/minimax-m2.5-free", "opencode/nemotron-3-super-free"],
-        )
-
-    def test_run_prompt_retries_free_models_after_quota(self):
+    def test_run_prompt_uses_api_session_successfully(self):
         config = BridgeConfig(
             telegram_token="123:token",
             opencode_model="opencode/big-pickle",
@@ -37,18 +28,13 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
             log_level="INFO",
         )
         bridge = OpenCodeBridge(config)
-        bridge._run_prompt_once = AsyncMock(
-            side_effect=[
-                "__QUOTA__:quota exceeded for opencode/big-pickle",
-                "__QUOTA__:quota exceeded for opencode/minimax-m2.5-free",
-                "fallback result from opencode/nemotron-3-super-free",
-            ]
-        )
+        bridge._get_or_create_session = AsyncMock(return_value="session-1")
+        bridge._run_prompt_via_api_sync = lambda session_id, prompt: "api result"
 
-        result = asyncio.run(bridge.run_prompt("test prompt"))
+        result = asyncio.run(bridge.run_prompt(123, "test prompt"))
 
-        self.assertEqual(result, "fallback result from opencode/nemotron-3-super-free")
-        self.assertEqual(bridge._run_prompt_once.await_count, 3)
+        self.assertEqual(result, "api result")
+        self.assertEqual(bridge._stats["successful_requests"], 1)
 
     def test_redacts_telegram_token_in_request_logs(self):
         text = "HTTP Request: POST https://api.telegram.org/bot123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890/getUpdates"
@@ -135,23 +121,9 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
 
         self.assertEqual(enhanced, "original prompt")
 
-    def test_clean_opencode_output_strips_tool_noise(self):
-        raw = """$ opencode run --model opencode/big-pickle "explain pid 112527"
-✱ running tool: ps
-> fetched process table
-
-I'll investigate PID 112527 to see what it's doing.
-## Summary for PID 112527
-
-**Process Info:**
-- **Command:** `.venv/bin/python main.py`
-"""
-
-        cleaned = _clean_opencode_output(raw)
-
-        self.assertIn("I'll investigate PID 112527", cleaned)
-        self.assertIn("## Summary for PID 112527", cleaned)
-        self.assertNotIn("✱ running tool", cleaned)
+    def test_extract_session_id_handles_nested_payload(self):
+        payload = {"data": {"session": {"id": "abc-123"}}}
+        self.assertEqual(_extract_session_id(payload), "abc-123")
 
     def test_chunk_message_splits_long_text(self):
         text = "a" * 8000
@@ -161,14 +133,7 @@ I'll investigate PID 112527 to see what it's doing.
         self.assertTrue(all(len(chunk) <= 3000 for chunk in chunks))
         self.assertEqual("".join(chunks), text)
 
-    def test_split_gws_command_handles_quotes(self):
-        parts = _split_gws_command("drive files list --params '{\"pageSize\":10}'")
-
-        self.assertEqual(parts[0:3], ["drive", "files", "list"])
-        self.assertEqual(parts[3], "--params")
-        self.assertEqual(parts[4], '{"pageSize":10}')
-
-    def test_run_gws_command_tracks_success(self):
+    def test_run_prompt_handles_api_failure(self):
         config = BridgeConfig(
             telegram_token="123:token",
             opencode_model="opencode/big-pickle",
@@ -179,15 +144,19 @@ I'll investigate PID 112527 to see what it's doing.
             log_level="INFO",
         )
         bridge = OpenCodeBridge(config)
-        bridge._run_gws_once = AsyncMock(return_value='{"ok":true}')
+        bridge._get_or_create_session = AsyncMock(return_value="session-1")
 
-        result = asyncio.run(bridge.run_gws_command("drive files list"))
+        def _fail(session_id, prompt):
+            raise RuntimeError("boom")
 
-        self.assertEqual(result, '{"ok":true}')
-        self.assertEqual(bridge._stats["gws_requests"], 1)
-        self.assertEqual(bridge._stats["gws_successful_requests"], 1)
+        bridge._run_prompt_via_api_sync = _fail
 
-    def test_run_gws_command_handles_empty(self):
+        result = asyncio.run(bridge.run_prompt(123, "hello"))
+
+        self.assertIn("OpenCode API request failed", result)
+        self.assertEqual(bridge._stats["failed_requests"], 1)
+
+    def test_send_session_message_prefers_parts_payload(self):
         config = BridgeConfig(
             telegram_token="123:token",
             opencode_model="opencode/big-pickle",
@@ -199,10 +168,33 @@ I'll investigate PID 112527 to see what it's doing.
         )
         bridge = OpenCodeBridge(config)
 
-        result = asyncio.run(bridge.run_gws_command(""))
+        captured_payloads = []
 
-        self.assertIn("Invalid or empty gws command", result)
-        self.assertEqual(bridge._stats["gws_failed_requests"], 1)
+        def _fake_request(method, path, payload=None):
+            captured_payloads.append(payload)
+            return {"text": "ok"}
+
+        bridge._opencode_request_sync = _fake_request
+
+        result = bridge._send_session_message_sync("session-1", "Hello")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured_payloads[0], {"parts": [{"type": "text", "text": "Hello"}]})
+
+    def test_extract_text_candidates_from_parts_payload(self):
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "parts": [
+                        {"type": "text", "text": "Hello from assistant"},
+                    ],
+                }
+            ]
+        }
+
+        candidates = _extract_text_candidates(payload)
+        self.assertIn("Hello from assistant", candidates)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
 [Unit]
-Description=TeleWatch Telegram OpenCode Bridge
+Description=OpenCode API Server
 Wants=network-online.target
-Wants=opencode.service
-After=network-online.target opencode.service
+After=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/DevCrewX/Projects/TelegramRemoteProgressBot
 EnvironmentFile=%h/.config/telewatch/bridge.env
-ExecStart=/home/DevCrewX/Projects/TelegramRemoteProgressBot/.venv/bin/telewatch start --foreground
+ExecStart=opencode serve --hostname 127.0.0.1 --port 4096
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
