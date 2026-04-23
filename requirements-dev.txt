@@ -1,3 +1,4 @@
 -r requirements.txt
 build>=1.2.2
 pytest>=8.3.0
+nuitka>=2.3.0

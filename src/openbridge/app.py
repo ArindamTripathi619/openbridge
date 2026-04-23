@@ -246,7 +246,23 @@ def _with_legacy_openbridge_aliases(data: Dict[str, str]) -> Dict[str, str]:
 
 def get_resource_path(*parts: str) -> Path:
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return bundle_root.joinpath(*parts)
+    candidate = bundle_root.joinpath(*parts)
+    if candidate.exists():
+        return candidate
+
+    project_root = Path(__file__).resolve().parents[2]
+    fallback = project_root.joinpath(*parts)
+    if fallback.exists():
+        return fallback
+
+    return candidate
+
+
+def _load_banner_text() -> str:
+    banner_path = get_resource_path("banner.txt")
+    if banner_path.exists():
+        return banner_path.read_text(encoding="utf-8")
+    return ""
 
 
 def is_process_alive(pid: int) -> bool:
@@ -296,16 +312,12 @@ def _merged_config(config_path: Path, overrides: Optional[Dict[str, str]] = None
     return BridgeConfig.from_mapping(data)
 
 
-def _daemonize(log_file: Path) -> None:
+def _daemonize(log_file: Path) -> Optional[int]:
     pid = os.fork()
     if pid > 0:
-        sys.exit(0)
+        return pid
 
     os.setsid()
-
-    pid = os.fork()
-    if pid > 0:
-        sys.exit(0)
 
     os.chdir("/")
     os.umask(0)
@@ -317,6 +329,8 @@ def _daemonize(log_file: Path) -> None:
     with open(log_file, "a+", buffering=1) as log_handle:
         os.dup2(log_handle.fileno(), sys.stdout.fileno())
         os.dup2(log_handle.fileno(), sys.stderr.fileno())
+
+    return None
 
 
 def _write_pid() -> None:
@@ -471,9 +485,11 @@ def _show_banner() -> None:
     if not sys.stdout.isatty():
         return
 
-    print(OPENBRIDGE_BANNER.format(version=__version__))
-    print("\x1b[38;5;214m  OpenBridge\x1b[0m")
-    print("\x1b[38;5;244m  Telegram <-> OpenCode Bridge\x1b[0m\n")
+    banner_text = _load_banner_text()
+    if not banner_text:
+        return
+
+    sys.stdout.write(banner_text)
 
 
 def _install_opencode_systemd_unit(workspace_dir: Path) -> None:
@@ -877,6 +893,7 @@ def setup_command(_: argparse.Namespace) -> None:
 
 def start_command(args: argparse.Namespace) -> None:
     _show_banner()
+    print(f"Telegram ↔ OpenCode Bridge  •  v{__version__}")
     config_path = Path(args.config) if args.config else CONFIG_FILE
     if not config_path.exists():
         print(f"Config not found: {config_path}")
@@ -912,8 +929,23 @@ def start_command(args: argparse.Namespace) -> None:
     previous_signal_handlers = _install_signal_handlers(stop_event)
     try:
         if not foreground:
-            _daemonize(LOG_FILE)
+            daemon_pid = _daemonize(LOG_FILE)
+            if daemon_pid is not None:
+                deadline = time.time() + 5
+                active_pid: Optional[int] = None
+                while time.time() < deadline:
+                    active_pid = _load_pid()
+                    if active_pid is not None:
+                        break
+                    time.sleep(0.05)
+
+                print(f"OpenBridge is running with PID {active_pid or daemon_pid}")
+                return
+
             _write_pid()
+            print(f"OpenBridge is running with PID {os.getpid()}")
+        else:
+            print(f"OpenBridge is running in foreground with PID {os.getpid()}")
 
         try:
             run_bridge(config, foreground=foreground, log_file=LOG_FILE, stop_event=stop_event)
@@ -937,6 +969,7 @@ def stop_command(args: argparse.Namespace) -> None:
             if active.returncode == 0:
                 subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME], check=True)
                 print(f"Stopped {SYSTEMD_UNIT_NAME}")
+                print("OpenBridge stopped.")
                 return
 
         if force and shutil.which("pkill") is not None:
@@ -946,6 +979,7 @@ def stop_command(args: argparse.Namespace) -> None:
             )
             if result.returncode == 0:
                 print("Terminated foreground openbridge process(es)")
+                print("OpenBridge stopped.")
                 return
             else:
                 print("No foreground process found with --force")
@@ -960,8 +994,10 @@ def stop_command(args: argparse.Namespace) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
         print(f"Sent SIGTERM to PID {pid}")
+        print("OpenBridge stopped.")
     except ProcessLookupError:
         print("Process not found; cleaning stale pid file.")
+        print("OpenBridge stopped.")
     finally:
         _remove_pid()
 

@@ -358,6 +358,16 @@ Install without enabling:
 openbridge install-systemd --no-enable
 ```
 
+## Binary Build (Nuitka)
+
+Build a standalone binary with Nuitka:
+
+```bash
+./scripts/build_nuitka.sh
+```
+
+Output is written to `dist-nuitka/`.
+
 Remove service:
 
 ```bash

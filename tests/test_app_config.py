@@ -13,6 +13,7 @@ from src.openbridge.app import (
     _build_opencode_systemd_unit,
     _build_systemd_unit,
     _install_missing_dependencies,
+    _load_banner_text,
     _load_pid,
     _merged_config,
     _missing_dependencies,
@@ -207,14 +208,19 @@ class TestAppConfig(unittest.TestCase):
             def isatty(self):
                 return True
 
+        expected_banner = (Path(__file__).resolve().parents[1] / "banner.txt").read_text(encoding="utf-8")
         buffer = TtyBuffer()
         with patch.object(app_module.sys, "stdout", buffer):
             _show_banner()
 
         output = buffer.getvalue()
-        self.assertIn("OpenBridge", output)
-        self.assertIn("\x1b[38;5;", output)
-        self.assertIn("v1.0.0", output)
+        self.assertEqual(output, expected_banner)
+
+    def test_load_banner_text_reads_banner_file(self):
+        banner_text = _load_banner_text()
+
+        self.assertIn("\x1b[38;2;255;153;102m", banner_text)
+        self.assertGreater(len(banner_text), 1000)
 
     def test_get_resource_path_uses_bundle_root_when_present(self):
         from src.openbridge import app as app_module

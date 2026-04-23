@@ -441,6 +441,13 @@ class OpenCodeBridge:
         self._workflow_file_lock = asyncio.Lock()
         self._pending_workflow_drafts: dict[int, dict] = {}
 
+    async def close(self) -> None:
+        async with self._session_lock:
+            self._chat_sessions.clear()
+        async with self._workflow_file_lock:
+            self._pending_workflow_drafts.clear()
+        logger.info("OpenCode bridge state cleared during shutdown")
+
     def set_workflow_stats_provider(self, provider: Optional[Callable[[], List[str]]]) -> None:
         self._workflow_stats_provider = provider
 
@@ -1580,6 +1587,11 @@ def build_application(config: BridgeConfig, *, bridge: Optional[OpenCodeBridge] 
                 logger.info("Workflow manager stopped successfully")
             except Exception as exc:
                 logger.exception("Error during workflow manager shutdown")
+
+        try:
+            await bridge.close()
+        except Exception:
+            logger.exception("Error during bridge shutdown")
 
     app = (
         Application.builder()
