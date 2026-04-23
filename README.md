@@ -143,6 +143,60 @@ For foreground debugging:
 openbridge start --foreground --debug
 ```
 
+## Install From Release Artifacts (Linux)
+
+If you do not want to clone this repository, you can install OpenBridge directly from the GitHub release artifacts.
+
+Release page:
+
+- [OpenBridge v1.0.0 release](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/tag/v1.0.0)
+
+Direct artifact links:
+
+- [openbridge-1.0.0-py3-none-any.whl](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.0/openbridge-1.0.0-py3-none-any.whl)
+- [openbridge-1.0.0.tar.gz](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.0/openbridge-1.0.0.tar.gz)
+
+Prerequisites:
+
+- Python 3.8+ (3.10+ recommended)
+- A Telegram bot token from BotFather
+- OpenCode CLI and runtime dependencies (`npm`, `opencode`, etc.)
+
+Install using wheel (recommended):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ./openbridge-1.0.0-py3-none-any.whl
+```
+
+Install using source tarball:
+
+```bash
+tar -xzf openbridge-1.0.0.tar.gz
+cd openbridge-1.0.0
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+```
+
+First run:
+
+```bash
+openbridge setup
+openbridge start
+```
+
+Useful commands:
+
+```bash
+openbridge status
+openbridge stop
+openbridge --version
+```
+
 ## Command Lifecycle
 
 `openbridge setup`:
