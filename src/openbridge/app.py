@@ -956,50 +956,106 @@ def start_command(args: argparse.Namespace) -> None:
         _restore_signal_handlers(previous_signal_handlers)
 
 
+def _find_openbridge_pids() -> set[int]:
+    pids: set[int] = set()
+    ps_result = subprocess.run(
+        ["ps", "-eo", "pid=,args="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if ps_result.returncode != 0:
+        return pids
+
+    stdout = ps_result.stdout if isinstance(ps_result.stdout, str) else ""
+    current_pid = os.getpid()
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+
+        pid_text, cmdline = parts
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+
+        if pid == current_pid:
+            continue
+
+        cmdline_lc = cmdline.lower()
+        if "openbridge stop" in cmdline_lc:
+            continue
+
+        is_openbridge_process = (
+            "openbridge.app start" in cmdline_lc
+            or "openbridge start" in cmdline_lc
+            or "python -m openbridge.app" in cmdline_lc
+        )
+        if is_openbridge_process:
+            pids.add(pid)
+
+    return pids
+
+
+def _wait_for_exit(pids: set[int], timeout_seconds: float = 3.0) -> set[int]:
+    deadline = time.time() + timeout_seconds
+    remaining = {pid for pid in pids if is_process_alive(pid)}
+    while remaining and time.time() < deadline:
+        time.sleep(0.1)
+        remaining = {pid for pid in remaining if is_process_alive(pid)}
+    return remaining
+
+
 def stop_command(args: argparse.Namespace) -> None:
-    pid = _load_pid()
     force = getattr(args, "force", False)
-    
-    if not pid:
-        if shutil.which("systemctl") is not None:
-            active = subprocess.run(
-                ["systemctl", "--user", "is-active", "--quiet", SYSTEMD_UNIT_NAME],
-                check=False,
-            )
-            if active.returncode == 0:
-                subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME], check=True)
-                print(f"Stopped {SYSTEMD_UNIT_NAME}")
-                print("OpenBridge stopped.")
-                return
 
-        if force and shutil.which("pkill") is not None:
-            result = subprocess.run(
-                ["pkill", "-f", "openbridge start.*--foreground"],
-                check=False,
-            )
-            if result.returncode == 0:
-                print("Terminated foreground openbridge process(es)")
-                print("OpenBridge stopped.")
-                return
-            else:
-                print("No foreground process found with --force")
-                return
+    if shutil.which("systemctl") is not None:
+        subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME], check=False)
 
-        print("No running background process found.")
-        print("If openbridge is running in foreground mode, stop it with Ctrl+C in that terminal.")
-        if shutil.which("pkill") is not None:
-            print("Or use: openbridge stop --force")
+    candidates: set[int] = set()
+    pid = _load_pid()
+    if pid and pid > 0:
+        candidates.add(pid)
+    candidates.update(_find_openbridge_pids())
+
+    if not candidates:
+        _remove_pid()
+        print("No running OpenBridge process found.")
         return
 
-    try:
-        os.kill(pid, signal.SIGTERM)
-        print(f"Sent SIGTERM to PID {pid}")
-        print("OpenBridge stopped.")
-    except ProcessLookupError:
-        print("Process not found; cleaning stale pid file.")
-        print("OpenBridge stopped.")
-    finally:
-        _remove_pid()
+    for process_pid in sorted(candidates):
+        try:
+            os.kill(process_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            print(f"No permission to signal PID {process_pid}; skipping")
+
+    remaining = _wait_for_exit(candidates)
+    if remaining and force:
+        for process_pid in sorted(remaining):
+            try:
+                os.kill(process_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                print(f"No permission to kill PID {process_pid}; skipping")
+        remaining = _wait_for_exit(remaining, timeout_seconds=1.0)
+
+    _remove_pid()
+    stopped_count = len(candidates) - len(remaining)
+    if remaining:
+        print(f"Stopped {stopped_count} OpenBridge process(es); still running: {sorted(remaining)}")
+        if not force:
+            print("Use --force to send SIGKILL to stuck processes.")
+        return
+
+    print(f"OpenBridge stopped ({stopped_count} process(es) terminated).")
 
 
 def status_command(_: argparse.Namespace) -> None:
@@ -1030,7 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument(
         "--force",
         action="store_true",
-        help="Force-terminate foreground processes (pkill -f 'openbridge start.*--foreground')",
+        help="Send SIGKILL to any OpenBridge process that ignores SIGTERM",
     )
     stop_parser.set_defaults(func=stop_command)
 

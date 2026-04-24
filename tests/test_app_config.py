@@ -410,17 +410,16 @@ class TestAppConfig(unittest.TestCase):
         with patch.object(app_module, "_load_pid", return_value=None), patch.object(
             app_module.shutil, "which", return_value="/bin/systemctl"
         ), patch.object(app_module.subprocess, "run") as mock_run:
-            mock_run.side_effect = [Mock(returncode=0), Mock(returncode=0)]
+            mock_run.side_effect = [
+                Mock(returncode=0),  # systemctl stop
+                Mock(returncode=0, stdout=""),  # ps scan
+            ]
 
             app_module.stop_command(Mock())
 
-            self.assertEqual(
-                [call.args[0] for call in mock_run.call_args_list],
-                [
-                    ["systemctl", "--user", "is-active", "--quiet", "openbridge.service"],
-                    ["systemctl", "--user", "stop", "openbridge.service"],
-                ],
-            )
+            commands = [call.args[0] for call in mock_run.call_args_list]
+            self.assertIn(["systemctl", "--user", "stop", "openbridge.service"], commands)
+            self.assertIn(["ps", "-eo", "pid=,args="], commands)
 
     def test_stop_command_force_terminates_foreground_process(self):
         from src.openbridge import app as app_module
@@ -428,28 +427,23 @@ class TestAppConfig(unittest.TestCase):
         with patch.object(app_module, "_load_pid", return_value=None), patch.object(
             app_module.shutil, "which"
         ) as mock_which, patch.object(app_module.subprocess, "run") as mock_run:
-            # Mock pkill availability, systemctl not active
             def which_side_effect(cmd):
-                if cmd == "pkill":
-                    return "/bin/pkill"
-                elif cmd == "systemctl":
+                if cmd == "systemctl":
                     return "/bin/systemctl"
                 return None
 
             mock_which.side_effect = which_side_effect
-            mock_run.side_effect = [Mock(returncode=1), Mock(returncode=0)]  # systemctl is-active fails, pkill succeeds
+            mock_run.side_effect = [
+                Mock(returncode=0),  # systemctl stop
+                Mock(returncode=0, stdout=""),  # ps scan
+            ]
 
             args = Mock(force=True)
             app_module.stop_command(args)
 
-            # Should attempt systemctl is-active, then pkill
-            self.assertEqual(
-                [call.args[0] for call in mock_run.call_args_list],
-                [
-                    ["systemctl", "--user", "is-active", "--quiet", "openbridge.service"],
-                    ["pkill", "-f", "openbridge start.*--foreground"],
-                ],
-            )
+            commands = [call.args[0] for call in mock_run.call_args_list]
+            self.assertIn(["systemctl", "--user", "stop", "openbridge.service"], commands)
+            self.assertIn(["ps", "-eo", "pid=,args="], commands)
 
     def test_missing_dependencies_detects_absent_binaries(self):
         def which_side_effect(binary):

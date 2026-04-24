@@ -47,6 +47,11 @@ CURRENT_ENV_PREFIX = "OPENBRIDGE_"
 SENSITIVE_LOG_PATTERNS = (
     re.compile(r"(https?://api\.telegram\.org/bot)(\d{6,12}:[A-Za-z0-9_-]+)(/)", re.IGNORECASE),
     re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{20,})\b"),
+    re.compile(r"\b(?:sk|gsk|rk|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9._~+/=-]{16,}\b"),
+    re.compile(
+        r"(?i)\b(authorization|api[-_ ]?key|token|password|secret)\b\s*[:=]\s*([\"']?)[^\s\"']+\2"
+    ),
 )
 
 
@@ -314,9 +319,16 @@ def _parse_llm_role_config(
 
 
 def _redact_sensitive_text(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        if match.lastindex and match.lastindex >= 3:
+            return f"{match.group(1)}[REDACTED]{match.group(3)}"
+        if match.lastindex and match.lastindex >= 1:
+            return f"{match.group(1)}=[REDACTED]"
+        return "[REDACTED]"
+
     redacted = text
     for pattern in SENSITIVE_LOG_PATTERNS:
-        redacted = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]{match.group(3)}" if match.lastindex and match.lastindex >= 3 else "[REDACTED]", redacted)
+        redacted = pattern.sub(_replace, redacted)
     return redacted
 
 
