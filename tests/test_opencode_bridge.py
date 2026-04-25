@@ -15,6 +15,7 @@ from src.openbridge.opencode_bridge import (
     OpenCodeBridge,
     run_bridge,
     _chunk_message,
+    _escape_markdown_v2,
     _extract_session_id,
     _extract_text_candidates,
     _redact_sensitive_text,
@@ -201,6 +202,37 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(captured_payloads[0], {"parts": [{"type": "text", "text": "Hello"}]})
+
+    def test_send_result_messages_sends_escaped_markdown_for_raw_output(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+        bridge.decorate_output = AsyncMock(return_value=None)
+
+        bot = AsyncMock()
+        app = Mock(bot=bot)
+
+        asyncio.run(bridge._send_result_messages(123, "Hello, world!", app))
+
+        bot.send_message.assert_awaited_once_with(
+            chat_id=123,
+            text="Hello, world\\!",
+            parse_mode="MarkdownV2",
+        )
+
+    def test_escape_markdown_v2_preserves_code_and_escapes_plain_text(self):
+        value = "a.b! `x.y!`\\n```text\\nq.w!\\n``` and \\\\"
+
+        escaped = _escape_markdown_v2(value)
+
+        self.assertEqual(escaped, "a\\.b\\! `x.y!`\\n```text\\nq.w!\\n``` and \\\\")
 
     def test_extract_text_candidates_from_parts_payload(self):
         payload = {

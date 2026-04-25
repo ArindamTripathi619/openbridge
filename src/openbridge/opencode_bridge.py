@@ -27,7 +27,6 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.helpers import escape_markdown
 
 logger = logging.getLogger("opencode_bridge")
 
@@ -54,9 +53,48 @@ SENSITIVE_LOG_PATTERNS = (
     ),
 )
 
+MDV2_SPECIAL_CHARS = r"_*[]()~`>#+-=|{}.!"
+MDV2_CODE_BLOCK_RE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
+
 
 def _escape_markdown_v2(text: str) -> str:
-    return escape_markdown(str(text), version=2)
+    text = str(text)
+
+    def _escape_plain_segment(segment: str) -> str:
+        escaped: List[str] = []
+        i = 0
+        while i < len(segment):
+            ch = segment[i]
+            if ch == "\\":
+                if i + 1 < len(segment) and segment[i + 1] in ("n", "\\", *MDV2_SPECIAL_CHARS):
+                    escaped.append("\\")
+                    escaped.append(segment[i + 1])
+                    i += 2
+                    continue
+                escaped.append("\\\\")
+                i += 1
+                continue
+
+            if ch in MDV2_SPECIAL_CHARS:
+                escaped.append("\\")
+            escaped.append(ch)
+            i += 1
+
+        return "".join(escaped)
+
+    output: List[str] = []
+    last_end = 0
+    for match in MDV2_CODE_BLOCK_RE.finditer(text):
+        start, end = match.span()
+        if start > last_end:
+            output.append(_escape_plain_segment(text[last_end:start]))
+        output.append(match.group(0))
+        last_end = end
+
+    if last_end < len(text):
+        output.append(_escape_plain_segment(text[last_end:]))
+
+    return "".join(output)
 
 
 @dataclass
@@ -1524,7 +1562,11 @@ class OpenCodeBridge:
                 if len(chunk) > TELEGRAM_LIMIT:
                     chunk = chunk[:TELEGRAM_LIMIT]
                 try:
-                    await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=_escape_markdown_v2(chunk),
+                        parse_mode="MarkdownV2",
+                    )
                 except Exception as send_exc:
                     logger.error("Failed to send message chunk to chat %s (len=%d): %s", chat_id, len(chunk), send_exc)
                     raise
