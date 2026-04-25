@@ -149,12 +149,12 @@ If you do not want to clone this repository, you can install OpenBridge directly
 
 Release page:
 
-- [OpenBridge v1.0.0 release](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/tag/v1.0.0)
+- [OpenBridge v1.0.1 release](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/tag/v1.0.1)
 
 Direct artifact links:
 
-- [openbridge-1.0.0-py3-none-any.whl](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.0/openbridge-1.0.0-py3-none-any.whl)
-- [openbridge-1.0.0.tar.gz](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.0/openbridge-1.0.0.tar.gz)
+- [openbridge-1.0.1-py3-none-any.whl](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.1/openbridge-1.0.1-py3-none-any.whl)
+- [openbridge-1.0.1.tar.gz](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.1/openbridge-1.0.1.tar.gz)
 
 Prerequisites:
 
@@ -168,14 +168,14 @@ Install using wheel (recommended):
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install ./openbridge-1.0.0-py3-none-any.whl
+python -m pip install ./openbridge-1.0.1-py3-none-any.whl
 ```
 
 Install using source tarball:
 
 ```bash
-tar -xzf openbridge-1.0.0.tar.gz
-cd openbridge-1.0.0
+tar -xzf openbridge-1.0.1.tar.gz
+cd openbridge-1.0.1
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import html
 import json
 import logging
 import os
@@ -28,6 +27,7 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.helpers import escape_markdown
 
 logger = logging.getLogger("opencode_bridge")
 
@@ -53,6 +53,10 @@ SENSITIVE_LOG_PATTERNS = (
         r"(?i)\b(authorization|api[-_ ]?key|token|password|secret)\b\s*[:=]\s*([\"']?)[^\s\"']+\2"
     ),
 )
+
+
+def _escape_markdown_v2(text: str) -> str:
+    return escape_markdown(str(text), version=2)
 
 
 @dataclass
@@ -876,20 +880,20 @@ class OpenCodeBridge:
     def _render_decorated_messages(self, payload: dict) -> List[str]:
         messages: List[str] = []
 
-        title = html.escape(str(payload.get("title") or "OpenCode Result"))
-        summary = html.escape(str(payload.get("summary") or "").strip())
+        title = _escape_markdown_v2(str(payload.get("title") or "OpenCode Result"))
+        summary = _escape_markdown_v2(str(payload.get("summary") or "").strip())
         if summary:
-            messages.append(f"<b>{title}</b>\n{summary}")
+            messages.append(f"*{title}*\n{summary}")
         else:
-            messages.append(f"<b>{title}</b>")
+            messages.append(f"*{title}*")
 
         def render_section(label: str, items: List[str]) -> Optional[str]:
             cleaned_items = [self._truncate_text(item, 420) for item in items if str(item).strip()]
             if not cleaned_items:
                 return None
-            lines = [f"<b>{html.escape(label)}</b>"]
+            lines = [f"*{_escape_markdown_v2(label)}*"]
             for item in cleaned_items[:6]:
-                lines.append(f"• {html.escape(item)}")
+                lines.append(f"• {_escape_markdown_v2(item)}")
             return "\n".join(lines)
 
         for label, key in (("Highlights", "highlights"), ("Actions", "actions"), ("Warnings", "warnings")):
@@ -919,17 +923,17 @@ class OpenCodeBridge:
         last_error = self._stats.get("last_error") or "none"
 
         lines = [
-            "<b>Health</b>",
+            "*Health*",
             f"Status: running",
-            f"Uptime: {html.escape(uptime)}",
-            f"OpenCode model: {html.escape(str(model))}",
-            f"OpenCode API: {html.escape(self.config.opencode_api_base_url)}",
+            f"Uptime: {_escape_markdown_v2(uptime)}",
+            f"OpenCode model: {_escape_markdown_v2(str(model))}",
+            f"OpenCode API: {_escape_markdown_v2(self.config.opencode_api_base_url)}",
             f"Active sessions: {len(self._chat_sessions)}",
-            f"Input LLM rewrite: {html.escape(input_llm_state)}",
-            f"Output decoration: {html.escape(decorator_state)}",
-            f"Chat access: {html.escape(allowed)}",
-            f"Last result: {html.escape(str(self._stats.get('last_result_kind') or 'none'))}",
-            f"Last error: {html.escape(str(last_error))}",
+            f"Input LLM rewrite: {_escape_markdown_v2(input_llm_state)}",
+            f"Output decoration: {_escape_markdown_v2(decorator_state)}",
+            f"Chat access: {_escape_markdown_v2(allowed)}",
+            f"Last result: {_escape_markdown_v2(str(self._stats.get('last_result_kind') or 'none'))}",
+            f"Last error: {_escape_markdown_v2(str(last_error))}",
         ]
         return "\n".join(lines)
 
@@ -940,7 +944,7 @@ class OpenCodeBridge:
         uptime = f"{uptime_hours}h {uptime_minutes}m {uptime_seconds}s"
 
         lines = [
-            "<b>Stats</b>",
+            "*Stats*",
             f"Requests: {self._stats['requests']}",
             f"Successful: {self._stats['successful_requests']}",
             f"Failed: {self._stats['failed_requests']}",
@@ -948,8 +952,8 @@ class OpenCodeBridge:
             f"Input LLM failures: {self._stats['input_llm_failures']}",
             f"Decorated outputs: {self._stats['decorated_outputs']}",
             f"Decorator failures: {self._stats['decorator_failures']}",
-            f"Last model: {html.escape(str(self._stats.get('last_model') or 'none'))}",
-            f"Uptime: {html.escape(uptime)}", 
+            f"Last model: {_escape_markdown_v2(str(self._stats.get('last_model') or 'none'))}",
+            f"Uptime: {_escape_markdown_v2(uptime)}",
             f"Pending workflow drafts: {len(self._pending_workflow_drafts)}",
         ]
         if self._workflow_stats_provider is not None:
@@ -959,8 +963,8 @@ class OpenCodeBridge:
                 workflow_lines = [f"Workflows stats error: {exc}"]
             if workflow_lines:
                 lines.append("")
-                lines.append("<b>Workflows</b>")
-                lines.extend(html.escape(str(item)) for item in workflow_lines)
+                lines.append("*Workflows*")
+                lines.extend(_escape_markdown_v2(str(item)) for item in workflow_lines)
         return "\n".join(lines)
 
     @staticmethod
@@ -1440,12 +1444,12 @@ class OpenCodeBridge:
     async def handle_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
             return
-        await update.effective_message.reply_text(self.get_health_message(), parse_mode="HTML")
+        await update.effective_message.reply_text(self.get_health_message(), parse_mode="MarkdownV2")
 
     async def handle_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
             return
-        await update.effective_message.reply_text(self.get_stats_message(), parse_mode="HTML")
+        await update.effective_message.reply_text(self.get_stats_message(), parse_mode="MarkdownV2")
 
     def _is_chat_allowed(self, chat_id: int) -> bool:
         if self.config.allow_all_chats:
@@ -1507,7 +1511,7 @@ class OpenCodeBridge:
             if decorated_chunks:
                 for chunk in decorated_chunks:
                     try:
-                        await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+                        await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
                     except Exception as send_exc:
                         logger.error("Failed to send decorated message to chat %s: %s", chat_id, send_exc)
                         try:
@@ -1520,7 +1524,7 @@ class OpenCodeBridge:
                 if len(chunk) > TELEGRAM_LIMIT:
                     chunk = chunk[:TELEGRAM_LIMIT]
                 try:
-                    await app.bot.send_message(chat_id=chat_id, text=chunk)
+                    await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
                 except Exception as send_exc:
                     logger.error("Failed to send message chunk to chat %s (len=%d): %s", chat_id, len(chunk), send_exc)
                     raise

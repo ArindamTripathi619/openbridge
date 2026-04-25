@@ -199,7 +199,7 @@ class TestAppConfig(unittest.TestCase):
             parser.parse_args(["--version"])
 
         self.assertEqual(exc.exception.code, 0)
-        self.assertIn("openbridge 1.0.0", buffer.getvalue())
+        self.assertIn("openbridge 1.0.1", buffer.getvalue())
 
     def test_show_banner_prints_colored_ascii_art(self):
         from src.openbridge import app as app_module
