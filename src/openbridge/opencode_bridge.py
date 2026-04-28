@@ -41,6 +41,8 @@ DEFAULT_LITELLM_PORT = 8000
 DEFAULT_LITELLM_MODEL = "groq-gpt-oss-mini"
 DEFAULT_OPENCODE_API_BASE_URL = "http://127.0.0.1:4096"
 DEFAULT_OPENCODE_API_TIMEOUT_SECONDS = 120
+DEFAULT_CHAT_QUEUE_MAX_PENDING = 5
+DEFAULT_CHAT_QUEUE_OVERFLOW_MODE = "reject"
 DEFAULT_WORKFLOW_PROMPT_MAX_CHARS = 12000
 DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE = "reject"
 LEGACY_ENV_PREFIX = "TELEWATCH_"
@@ -171,6 +173,8 @@ class BridgeConfig:
     opencode_api_username: str = "opencode"
     opencode_api_password: Optional[str] = None
     opencode_api_timeout_seconds: int = DEFAULT_OPENCODE_API_TIMEOUT_SECONDS
+    chat_queue_max_pending: int = DEFAULT_CHAT_QUEUE_MAX_PENDING
+    chat_queue_overflow_mode: str = DEFAULT_CHAT_QUEUE_OVERFLOW_MODE
     workflow_prompt_max_chars: int = DEFAULT_WORKFLOW_PROMPT_MAX_CHARS
     workflow_prompt_overflow_mode: str = DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE
 
@@ -221,6 +225,21 @@ class BridgeConfig:
         )
         if opencode_api_timeout_seconds <= 0:
             raise ValueError("OPENCODE_API_TIMEOUT_SECONDS must be > 0")
+
+        chat_queue_max_pending = int(
+            mapping.get("OPENBRIDGE_CHAT_QUEUE_MAX_PENDING", str(DEFAULT_CHAT_QUEUE_MAX_PENDING))
+        )
+        if chat_queue_max_pending <= 0:
+            raise ValueError("OPENBRIDGE_CHAT_QUEUE_MAX_PENDING must be > 0")
+
+        chat_queue_overflow_mode = (
+            mapping.get("OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE", DEFAULT_CHAT_QUEUE_OVERFLOW_MODE)
+            .strip()
+            .lower()
+            or DEFAULT_CHAT_QUEUE_OVERFLOW_MODE
+        )
+        if chat_queue_overflow_mode not in {"reject", "drop_oldest"}:
+            raise ValueError("OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE must be 'reject' or 'drop_oldest'")
 
         workflow_prompt_max_chars = int(
             mapping.get("OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS", str(DEFAULT_WORKFLOW_PROMPT_MAX_CHARS))
@@ -305,6 +324,8 @@ class BridgeConfig:
             opencode_api_username=opencode_api_username,
             opencode_api_password=opencode_api_password,
             opencode_api_timeout_seconds=opencode_api_timeout_seconds,
+            chat_queue_max_pending=chat_queue_max_pending,
+            chat_queue_overflow_mode=chat_queue_overflow_mode,
             workflow_prompt_max_chars=workflow_prompt_max_chars,
             workflow_prompt_overflow_mode=workflow_prompt_overflow_mode,
         )
@@ -607,12 +628,26 @@ class OpenCodeBridge:
         self._workflow_manager: Any = None
         self._workflow_file_lock = asyncio.Lock()
         self._pending_workflow_drafts: dict[int, dict] = {}
+        self._chat_queue_lock = asyncio.Lock()
+        self._chat_queues: dict[int, asyncio.Queue[tuple[str, Application]]] = {}
+        self._chat_workers: dict[int, asyncio.Task[Any]] = {}
 
     async def close(self) -> None:
+        async with self._chat_queue_lock:
+            workers = list(self._chat_workers.values())
+            self._chat_workers.clear()
+            self._chat_queues.clear()
         async with self._session_lock:
             self._chat_sessions.clear()
         async with self._workflow_file_lock:
             self._pending_workflow_drafts.clear()
+        for worker in workers:
+            worker.cancel()
+        for worker in workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
         logger.info("OpenCode bridge state cleared during shutdown")
 
     def set_workflow_stats_provider(self, provider: Optional[Callable[[], List[str]]]) -> None:
@@ -1667,10 +1702,64 @@ class OpenCodeBridge:
                 await update.effective_message.reply_text("Request received. Sending to OpenCode API...")
             except Exception as reply_exc:
                 logger.error("Failed to send ACK message to chat %s: %s", chat_id, reply_exc)
-            logger.info("Queued prompt task for chat=%s", chat_id)
-            asyncio.create_task(self._run_and_respond(chat_id, prompt, context.application))
+            queued = await self._enqueue_chat_prompt(chat_id, prompt, context.application)
+            if queued:
+                logger.info("Queued prompt task for chat=%s", chat_id)
+            else:
+                logger.warning("Chat queue full for chat=%s (limit=%d)", chat_id, self.config.chat_queue_max_pending)
+                try:
+                    await update.effective_message.reply_text(
+                        "This chat has too many pending requests. Please wait for the current ones to finish."
+                    )
+                except Exception as reply_exc:
+                    logger.error("Failed to notify chat %s about queue overflow: %s", chat_id, reply_exc)
         except Exception as exc:
             logger.exception("Unexpected error in handle_text")
+
+    async def _enqueue_chat_prompt(self, chat_id: int, prompt: str, app: Application) -> bool:
+        async with self._chat_queue_lock:
+            queue = self._chat_queues.get(chat_id)
+            if queue is None:
+                queue = asyncio.Queue(maxsize=self.config.chat_queue_max_pending)
+                self._chat_queues[chat_id] = queue
+
+            if queue.full():
+                if self.config.chat_queue_overflow_mode == "drop_oldest":
+                    try:
+                        queue.get_nowait()
+                        queue.task_done()
+                    except asyncio.QueueEmpty:
+                        pass
+                else:
+                    return False
+
+            queue.put_nowait((prompt, app))
+            worker = self._chat_workers.get(chat_id)
+            if worker is None or worker.done():
+                self._chat_workers[chat_id] = asyncio.create_task(self._drain_chat_queue(chat_id))
+            return True
+
+    async def _drain_chat_queue(self, chat_id: int) -> None:
+        queue = self._chat_queues.get(chat_id)
+        if queue is None:
+            return
+
+        try:
+            while True:
+                prompt, app = await queue.get()
+                try:
+                    await self._run_and_respond(chat_id, prompt, app)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            async with self._chat_queue_lock:
+                worker = self._chat_workers.get(chat_id)
+                if worker is not None and worker is asyncio.current_task():
+                    self._chat_workers.pop(chat_id, None)
+                if queue.empty():
+                    self._chat_queues.pop(chat_id, None)
 
     async def _send_result_messages(self, chat_id: int, result: str, app: Application) -> None:
         try:

@@ -212,6 +212,101 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
 
         self.assertTrue(bridge._is_chat_allowed(999999))
 
+    def test_chat_queue_rejects_when_full(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            allow_all_chats=True,
+            log_level="INFO",
+            chat_queue_max_pending=1,
+            chat_queue_overflow_mode="reject",
+        )
+        bridge = OpenCodeBridge(config)
+
+        def _fake_create_task(coro):
+            coro.close()
+            worker = Mock()
+            worker.done.return_value = False
+            return worker
+
+        with patch("src.openbridge.opencode_bridge.asyncio.create_task", side_effect=_fake_create_task):
+            first_queued = asyncio.run(bridge._enqueue_chat_prompt(123, "first", Mock()))
+            second_queued = asyncio.run(bridge._enqueue_chat_prompt(123, "second", Mock()))
+
+        self.assertTrue(first_queued)
+        self.assertFalse(second_queued)
+        self.assertEqual(bridge._chat_queues[123].qsize(), 1)
+
+    def test_chat_queue_drops_oldest_when_configured(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            log_level="INFO",
+            chat_queue_max_pending=1,
+            chat_queue_overflow_mode="drop_oldest",
+        )
+        bridge = OpenCodeBridge(config)
+
+        def _fake_create_task(coro):
+            coro.close()
+            worker = Mock()
+            worker.done.return_value = False
+            return worker
+
+        with patch("src.openbridge.opencode_bridge.asyncio.create_task", side_effect=_fake_create_task):
+            first_queued = asyncio.run(bridge._enqueue_chat_prompt(123, "first", Mock()))
+            second_queued = asyncio.run(bridge._enqueue_chat_prompt(123, "second", Mock()))
+
+        self.assertTrue(first_queued)
+        self.assertTrue(second_queued)
+        queue = bridge._chat_queues[123]
+        self.assertEqual(queue.qsize(), 1)
+        queued_prompt, _ = queue.get_nowait()
+        self.assertEqual(queued_prompt, "second")
+
+    def test_handle_text_reports_queue_overflow(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),
+            allow_all_chats=True,
+            log_level="INFO",
+            chat_queue_max_pending=1,
+            chat_queue_overflow_mode="reject",
+        )
+        bridge = OpenCodeBridge(config)
+
+        def _fake_create_task(coro):
+            coro.close()
+            worker = Mock()
+            worker.done.return_value = False
+            return worker
+
+        with patch("src.openbridge.opencode_bridge.asyncio.create_task", side_effect=_fake_create_task):
+            asyncio.run(bridge._enqueue_chat_prompt(123, "first", Mock()))
+
+        message = Mock()
+        message.text = "second"
+        message.reply_text = AsyncMock()
+        update = Mock(effective_message=message, effective_chat=Mock(id=123))
+        context = Mock(application=Mock())
+
+        asyncio.run(bridge.handle_text(update, context))
+
+        self.assertGreaterEqual(message.reply_text.await_count, 1)
+        self.assertIn("too many pending requests", str(message.reply_text.await_args_list[-1]))
+
     def test_workflow_list_action_is_reachable(self):
         config = BridgeConfig(
             telegram_token="123:token",

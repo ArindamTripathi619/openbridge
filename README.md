@@ -320,6 +320,7 @@ Template examples:
 - Telegram bot token
 - OpenCode model and working directory
 - OpenCode API URL/auth/timeout
+- per-chat queue depth and overflow policy for burst control
 - OpenCode server username/password for the `opencode.service` unit
 - Telegram allowed chat IDs
 - log level
@@ -352,6 +353,8 @@ Core runtime:
 - `OPENCODE_API_USERNAME`
 - `OPENCODE_API_PASSWORD`
 - `OPENCODE_API_TIMEOUT_SECONDS`
+- `OPENBRIDGE_CHAT_QUEUE_MAX_PENDING`
+- `OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE` (`reject` by default; `drop_oldest` keeps the latest prompt instead)
 - `TELEGRAM_ALLOWED_CHAT_IDS`
 - `TELEGRAM_ALLOW_ALL_CHATS` (default `0`; when `0` and allowlist is empty, all chats are denied)
 - `LOG_LEVEL`
@@ -426,6 +429,8 @@ No direct `!gws`/`/gws` execution path exists in this architecture. Google Works
 - If `systemctl --user` is not present, bridge assumes OpenCode server is already running externally.
 - Health and stats commands expose service and request-level visibility.
 - Token-like Telegram strings are redacted from logs.
+- Each chat gets a bounded prompt queue so bursts do not create unbounded background tasks.
+- When the per-chat queue is full, the default behavior is to reject the newest prompt; `drop_oldest` keeps the most recent prompt instead.
 
 ## Systemd (User Service)
 

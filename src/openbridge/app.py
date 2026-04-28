@@ -89,6 +89,8 @@ CONFIG_KEYS = [
     "OPENCODE_API_USERNAME",
     "OPENCODE_API_PASSWORD",
     "OPENCODE_API_TIMEOUT_SECONDS",
+    "OPENBRIDGE_CHAT_QUEUE_MAX_PENDING",
+    "OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE",
     "OPENCODE_SERVER_USERNAME",
     "OPENCODE_SERVER_PASSWORD",
     "TELEGRAM_ALLOWED_CHAT_IDS",
@@ -922,6 +924,18 @@ def setup_command(_: argparse.Namespace) -> None:
         "OpenCode API timeout seconds",
         current.get("OPENCODE_API_TIMEOUT_SECONDS", "120"),
     )
+    config["OPENBRIDGE_CHAT_QUEUE_MAX_PENDING"] = _prompt(
+        "Per-chat queue depth",
+        current.get("OPENBRIDGE_CHAT_QUEUE_MAX_PENDING", "5"),
+    )
+    queue_overflow_default = current.get("OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE", "reject")
+    queue_overflow_mode = _prompt(
+        "Per-chat queue overflow mode [reject/drop_oldest]",
+        queue_overflow_default,
+    ).strip().lower()
+    if queue_overflow_mode not in {"reject", "drop_oldest"}:
+        queue_overflow_mode = "reject"
+    config["OPENBRIDGE_CHAT_QUEUE_OVERFLOW_MODE"] = queue_overflow_mode
     config["OPENCODE_SERVER_USERNAME"] = _prompt(
         "OpenCode server username (optional)",
         current.get("OPENCODE_SERVER_USERNAME", ""),
