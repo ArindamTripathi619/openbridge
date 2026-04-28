@@ -444,7 +444,22 @@ Build a standalone binary with Nuitka:
 ./scripts/build_nuitka.sh
 ```
 
+This default path avoids implicit dependency downloads.
+If Nuitka requires external downloads and you explicitly trust that behavior:
+
+```bash
+./scripts/build_nuitka.sh --allow-downloads
+```
+
 Output is written to `dist-nuitka/`.
+When `sha256sum` is available, a checksum file is also written to `dist-nuitka/openbridge.sha256`.
+
+For automated builds (including CI-like environments), prefer explicit trust settings:
+
+- Use trusted package mirrors (for example via `PIP_INDEX_URL`).
+- Pin or hash dependencies where feasible.
+- Keep auto-download opt-in explicit (`NUITKA_ALLOW_DOWNLOADS=1` or `--allow-downloads`).
+- Verify generated artifacts with `sha256sum -c dist-nuitka/openbridge.sha256`.
 
 Remove service:
 
