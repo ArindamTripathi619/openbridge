@@ -16,6 +16,7 @@ import os
 import re
 import time
 import threading
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Set
@@ -45,6 +46,10 @@ DEFAULT_CHAT_QUEUE_MAX_PENDING = 5
 DEFAULT_CHAT_QUEUE_OVERFLOW_MODE = "reject"
 DEFAULT_WORKFLOW_PROMPT_MAX_CHARS = 12000
 DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE = "reject"
+DEFAULT_OPENCODE_BACKOFF_BASE_MS = 250
+DEFAULT_OPENCODE_BACKOFF_MAX_MS = 5000
+DEFAULT_OPENCODE_BACKOFF_FACTOR = 2.0
+DEFAULT_OPENCODE_BACKOFF_JITTER_PCT = 0.2
 LEGACY_ENV_PREFIX = "TELEWATCH_"
 CURRENT_ENV_PREFIX = "OPENBRIDGE_"
 SENSITIVE_LOG_PATTERNS = (
@@ -173,6 +178,10 @@ class BridgeConfig:
     opencode_api_username: str = "opencode"
     opencode_api_password: Optional[str] = None
     opencode_api_timeout_seconds: int = DEFAULT_OPENCODE_API_TIMEOUT_SECONDS
+    opencode_backoff_base_ms: int = DEFAULT_OPENCODE_BACKOFF_BASE_MS
+    opencode_backoff_max_ms: int = DEFAULT_OPENCODE_BACKOFF_MAX_MS
+    opencode_backoff_factor: float = DEFAULT_OPENCODE_BACKOFF_FACTOR
+    opencode_backoff_jitter_pct: float = DEFAULT_OPENCODE_BACKOFF_JITTER_PCT
     chat_queue_max_pending: int = DEFAULT_CHAT_QUEUE_MAX_PENDING
     chat_queue_overflow_mode: str = DEFAULT_CHAT_QUEUE_OVERFLOW_MODE
     workflow_prompt_max_chars: int = DEFAULT_WORKFLOW_PROMPT_MAX_CHARS
@@ -225,6 +234,30 @@ class BridgeConfig:
         )
         if opencode_api_timeout_seconds <= 0:
             raise ValueError("OPENCODE_API_TIMEOUT_SECONDS must be > 0")
+
+        opencode_backoff_base_ms = int(
+            mapping.get("OPENBRIDGE_OPENCODE_BACKOFF_BASE_MS", str(DEFAULT_OPENCODE_BACKOFF_BASE_MS))
+        )
+        if opencode_backoff_base_ms <= 0:
+            raise ValueError("OPENBRIDGE_OPENCODE_BACKOFF_BASE_MS must be > 0")
+
+        opencode_backoff_max_ms = int(
+            mapping.get("OPENBRIDGE_OPENCODE_BACKOFF_MAX_MS", str(DEFAULT_OPENCODE_BACKOFF_MAX_MS))
+        )
+        if opencode_backoff_max_ms <= 0:
+            raise ValueError("OPENBRIDGE_OPENCODE_BACKOFF_MAX_MS must be > 0")
+
+        opencode_backoff_factor = float(
+            mapping.get("OPENBRIDGE_OPENCODE_BACKOFF_FACTOR", str(DEFAULT_OPENCODE_BACKOFF_FACTOR))
+        )
+        if opencode_backoff_factor <= 1.0:
+            raise ValueError("OPENBRIDGE_OPENCODE_BACKOFF_FACTOR must be > 1.0")
+
+        opencode_backoff_jitter_pct = float(
+            mapping.get("OPENBRIDGE_OPENCODE_BACKOFF_JITTER_PCT", str(DEFAULT_OPENCODE_BACKOFF_JITTER_PCT))
+        )
+        if not (0.0 <= opencode_backoff_jitter_pct <= 1.0):
+            raise ValueError("OPENBRIDGE_OPENCODE_BACKOFF_JITTER_PCT must be between 0.0 and 1.0")
 
         chat_queue_max_pending = int(
             mapping.get("OPENBRIDGE_CHAT_QUEUE_MAX_PENDING", str(DEFAULT_CHAT_QUEUE_MAX_PENDING))
@@ -324,6 +357,10 @@ class BridgeConfig:
             opencode_api_username=opencode_api_username,
             opencode_api_password=opencode_api_password,
             opencode_api_timeout_seconds=opencode_api_timeout_seconds,
+            opencode_backoff_base_ms=opencode_backoff_base_ms,
+            opencode_backoff_max_ms=opencode_backoff_max_ms,
+            opencode_backoff_factor=opencode_backoff_factor,
+            opencode_backoff_jitter_pct=opencode_backoff_jitter_pct,
             chat_queue_max_pending=chat_queue_max_pending,
             chat_queue_overflow_mode=chat_queue_overflow_mode,
             workflow_prompt_max_chars=workflow_prompt_max_chars,
@@ -725,9 +762,25 @@ class OpenCodeBridge:
 
         deadline = time.time() + self.config.opencode_timeout_seconds
         poll_count = 0
+        attempt = 0
+        base_ms = int(getattr(self.config, "opencode_backoff_base_ms", DEFAULT_OPENCODE_BACKOFF_BASE_MS))
+        max_ms = int(getattr(self.config, "opencode_backoff_max_ms", DEFAULT_OPENCODE_BACKOFF_MAX_MS))
+        factor = float(getattr(self.config, "opencode_backoff_factor", DEFAULT_OPENCODE_BACKOFF_FACTOR))
+        jitter_pct = float(getattr(self.config, "opencode_backoff_jitter_pct", DEFAULT_OPENCODE_BACKOFF_JITTER_PCT))
+
         while time.time() < deadline:
-            time.sleep(1.0)
+            # compute adaptive backoff with optional jitter
+            sleep_ms = base_ms * (factor ** attempt)
+            if sleep_ms > max_ms:
+                sleep_ms = max_ms
+            if jitter_pct and jitter_pct > 0.0:
+                jitter_factor = random.uniform(max(0.0, 1.0 - jitter_pct), 1.0 + jitter_pct)
+                sleep_ms = sleep_ms * jitter_factor
+
+            sleep_seconds = max(0.05, float(sleep_ms) / 1000.0)
+            time.sleep(sleep_seconds)
             poll_count += 1
+            attempt += 1
             current = self._fetch_session_messages_sync(session_id)
             candidates = _extract_text_candidates(current)
             for candidate in reversed(candidates):
@@ -801,7 +854,7 @@ class OpenCodeBridge:
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", errors="replace")
-            except Exception:
+            except (UnicodeDecodeError, IOError):
                 detail = str(exc)
             raise RuntimeError(f"OpenCode API HTTP {exc.code}: {detail}") from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -812,7 +865,8 @@ class OpenCodeBridge:
 
         try:
             return json.loads(response_body)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.debug("OpenCode response was not valid JSON, treating as text: %s", exc)
             return {"text": response_body}
 
     def _resolve_llm_runtime(self, stage: str) -> Optional[dict]:
@@ -882,34 +936,38 @@ class OpenCodeBridge:
         return rewritten
 
     def _enhance_prompt_sync(self, runtime: dict, raw_prompt: str) -> Optional[str]:
-        payload = {
-            "model": runtime["model"],
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You rewrite user requests into high-signal prompts for OpenCode. "
-                        "Preserve intent, constraints, and expected output. "
-                        "Return plain text only, no markdown, no commentary."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": raw_prompt,
-                },
-            ],
-            "temperature": 0.1,
-        }
+        try:
+            payload = {
+                "model": runtime["model"],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You rewrite user requests into high-signal prompts for OpenCode. "
+                            "Preserve intent, constraints, and expected output. "
+                            "Return plain text only, no markdown, no commentary."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": raw_prompt,
+                    },
+                ],
+                "temperature": 0.1,
+            }
 
-        content = self._call_chat_completion(runtime, payload)
-        if not content:
+            content = self._call_chat_completion(runtime, payload)
+            if not content:
+                return None
+
+            candidate = content.strip()
+            if not candidate:
+                return None
+
+            return candidate[:8000]
+        except (ValueError, TypeError, KeyError) as exc:
+            logger.error("Input LLM prompt construction failed: %s", exc)
             return None
-
-        candidate = content.strip()
-        if not candidate:
-            return None
-
-        return candidate[:8000]
 
     def _is_error_result(self, text: str) -> bool:
         error_prefixes = (
@@ -988,15 +1046,19 @@ class OpenCodeBridge:
         return self._parse_decorator_json(content)
 
     def _call_chat_completion(self, runtime: dict, payload: dict) -> Optional[str]:
-        request = Request(
-            url=f"{str(runtime['base_url']).rstrip('/')}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {runtime['api_key']}",
-            },
-            method="POST",
-        )
+        try:
+            request = Request(
+                url=f"{str(runtime['base_url']).rstrip('/')}/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {runtime['api_key']}",
+                },
+                method="POST",
+            )
+        except (ValueError, TypeError) as exc:
+            logger.error("LLM request construction failed: %s", exc)
+            return None
 
         try:
             with urlopen(request, timeout=int(runtime["timeout_seconds"])) as response:
@@ -1007,8 +1069,8 @@ class OpenCodeBridge:
 
         try:
             response_json = json.loads(response_body)
-        except json.JSONDecodeError:
-            logger.warning("LLM response was not valid JSON")
+        except json.JSONDecodeError as exc:
+            logger.warning("LLM response was not valid JSON: %s", exc)
             return None
 
         choices = response_json.get("choices") or []
@@ -1026,20 +1088,24 @@ class OpenCodeBridge:
         return str(message.get("content") or "").strip()
 
     def _parse_decorator_json(self, text: str) -> Optional[dict]:
-        candidate = text.strip()
-        if candidate.startswith("```"):
-            candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
-            if candidate.endswith("```"):
-                candidate = candidate[:-3].strip()
-
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = candidate[start : end + 1]
-
         try:
+            candidate = text.strip()
+            if candidate.startswith("```"):
+                candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
+                if candidate.endswith("```"):
+                    candidate = candidate[:-3].strip()
+
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = candidate[start : end + 1]
+
             parsed = json.loads(candidate)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.debug("Decorator JSON parsing failed: %s", exc)
+            return None
+        except (ValueError, TypeError) as exc:
+            logger.debug("Decorator output processing failed: %s", exc)
             return None
 
         if not isinstance(parsed, dict):
@@ -1145,8 +1211,13 @@ class OpenCodeBridge:
         if self._workflow_stats_provider is not None:
             try:
                 workflow_lines = self._workflow_stats_provider()
-            except Exception as exc:
+            except (RuntimeError, ValueError, TypeError) as exc:
+                logger.warning("Workflow stats provider failed: %s", exc)
                 workflow_lines = [f"Workflows stats error: {exc}"]
+            except Exception as exc:
+                # Top-level guard: unexpected errors should not crash stats reporting
+                logger.error("Unexpected error in workflow stats provider: %s", exc)
+                workflow_lines = ["Workflows stats unavailable"]
             if workflow_lines:
                 lines.append("")
                 lines.append("*Workflows*")
@@ -1160,42 +1231,46 @@ class OpenCodeBridge:
 
     @staticmethod
     def _extract_json_object_text(text: str) -> Optional[str]:
-        candidate = text.strip()
-        if candidate.startswith("```"):
-            first_newline = candidate.find("\n")
-            if first_newline != -1:
-                candidate = candidate[first_newline + 1 :]
-            if candidate.endswith("```"):
-                candidate = candidate[:-3]
-            candidate = candidate.strip()
+        try:
+            candidate = text.strip()
+            if candidate.startswith("```"):
+                first_newline = candidate.find("\n")
+                if first_newline != -1:
+                    candidate = candidate[first_newline + 1 :]
+                if candidate.endswith("```"):
+                    candidate = candidate[:-3]
+                candidate = candidate.strip()
 
-        start = candidate.find("{")
-        if start == -1:
+            start = candidate.find("{")
+            if start == -1:
+                return None
+
+            depth = 0
+            in_string = False
+            escaped = False
+            for index in range(start, len(candidate)):
+                ch = candidate[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+
+                if ch == '"':
+                    in_string = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return candidate[start : index + 1]
             return None
-
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(candidate)):
-            ch = candidate[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
-                continue
-
-            if ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return candidate[start : index + 1]
-        return None
+        except (AttributeError, IndexError, TypeError) as exc:
+            logger.debug("JSON object extraction failed: %s", exc)
+            return None
 
     @staticmethod
     def _coerce_single_workflow(payload: object) -> dict:
