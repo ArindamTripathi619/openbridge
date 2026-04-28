@@ -186,12 +186,28 @@ class TestAppConfig(unittest.TestCase):
         self.assertIn("--foreground", unit_text)
         self.assertIn("opencode.service", unit_text)
 
+    def test_build_systemd_unit_includes_sandbox_directives(self):
+        unit_text = _build_systemd_unit(Path("/home/DevCrewX/Projects/TelegramRemoteProgressBot"))
+
+        self.assertIn("ProtectSystem=full", unit_text)
+        self.assertIn("ProtectHome=true", unit_text)
+        self.assertIn("PrivateTmp=true", unit_text)
+        self.assertIn("PrivateDevices=true", unit_text)
+
     def test_build_opencode_systemd_unit_uses_serve(self):
         unit_text = _build_opencode_systemd_unit(Path("/home/DevCrewX/Projects/TelegramRemoteProgressBot"))
 
         self.assertIn("OpenCode API Server", unit_text)
         self.assertIn("opencode serve --hostname 127.0.0.1 --port 4096", unit_text)
         self.assertIn(f"EnvironmentFile={OPENCODE_CONFIG_FILE}", unit_text)
+
+    def test_build_opencode_systemd_unit_includes_sandbox_directives(self):
+        unit_text = _build_opencode_systemd_unit(Path("/home/DevCrewX/Projects/TelegramRemoteProgressBot"))
+
+        self.assertIn("ProtectSystem=full", unit_text)
+        self.assertIn("ProtectHome=true", unit_text)
+        self.assertIn("PrivateTmp=true", unit_text)
+        self.assertIn("PrivateDevices=true", unit_text)
 
     def test_sync_opencode_env_contains_only_service_keys(self):
         from src.openbridge import app as app_module
