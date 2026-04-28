@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/DevCrewX/Projects/TelegramRemoteProgressBot
+WorkingDirectory=%h/<path-to-openbridge-workspace>
 EnvironmentFile=%h/.config/openbridge/bridge.env
 ExecStart=opencode serve --hostname 127.0.0.1 --port 4096
 Restart=on-failure

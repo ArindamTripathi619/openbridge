@@ -212,6 +212,53 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
 
         self.assertTrue(bridge._is_chat_allowed(999999))
 
+    def test_workflow_list_action_is_reachable(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={123},
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+        manager = Mock()
+        manager.summary_text.return_value = "Configured workflows"
+        bridge.set_workflow_manager(manager)
+
+        message = Mock()
+        message.reply_text = AsyncMock()
+        update = Mock(effective_message=message, effective_chat=Mock(id=123))
+        context = Mock(args=["list"], application=Mock())
+
+        asyncio.run(bridge.handle_workflow_command(update, context))
+
+        message.reply_text.assert_awaited_once_with("Configured workflows")
+
+    def test_health_and_stats_require_chat_allowlist(self):
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        denied_message = Mock()
+        denied_message.reply_text = AsyncMock()
+        denied_update = Mock(effective_message=denied_message, effective_chat=Mock(id=222))
+
+        asyncio.run(bridge.handle_health(denied_update, Mock()))
+        asyncio.run(bridge.handle_stats(denied_update, Mock()))
+
+        denied_message.reply_text.assert_any_await("This chat is not allowed to view health.")
+        denied_message.reply_text.assert_any_await("This chat is not allowed to view stats.")
+
     def test_send_session_message_prefers_parts_payload(self):
         config = BridgeConfig(
             telegram_token="123:token",

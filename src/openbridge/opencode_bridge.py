@@ -1473,7 +1473,6 @@ class OpenCodeBridge:
                     except Exception as reply_exc:
                         logger.error("Failed to notify workflow draft error to chat %s: %s", chat_id, reply_exc)
                 return
-            return
 
             if action == "list":
                 if self._workflow_manager is not None:
@@ -1572,12 +1571,20 @@ class OpenCodeBridge:
         )
 
     async def handle_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_message:
+        if not update.effective_message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+        if not self._is_chat_allowed(chat_id):
+            await update.effective_message.reply_text("This chat is not allowed to view health.")
             return
         await update.effective_message.reply_text(self.get_health_message(), parse_mode="MarkdownV2")
 
     async def handle_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_message:
+        if not update.effective_message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+        if not self._is_chat_allowed(chat_id):
+            await update.effective_message.reply_text("This chat is not allowed to view stats.")
             return
         await update.effective_message.reply_text(self.get_stats_message(), parse_mode="MarkdownV2")
 

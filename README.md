@@ -326,6 +326,7 @@ Core runtime:
 - `OPENCODE_API_PASSWORD`
 - `OPENCODE_API_TIMEOUT_SECONDS`
 - `TELEGRAM_ALLOWED_CHAT_IDS`
+- `TELEGRAM_ALLOW_ALL_CHATS` (default `0`; when `0` and allowlist is empty, all chats are denied)
 - `LOG_LEVEL`
 
 OpenCode daemon automation:

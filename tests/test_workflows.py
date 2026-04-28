@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -201,6 +202,10 @@ class TestWorkflows(unittest.TestCase):
     def test_safe_fetch_url_blocks_private_addresses(self):
         self.assertFalse(_is_safe_fetch_url("http://127.0.0.1:8080"))
         self.assertFalse(_is_safe_fetch_url("http://169.254.169.254/latest/meta-data/"))
+
+    @patch("src.openbridge.workflows.socket.getaddrinfo", side_effect=OSError("dns failed"))
+    def test_safe_fetch_url_denies_dns_resolution_errors(self, _mock_getaddrinfo):
+        self.assertFalse(_is_safe_fetch_url("https://example.invalid/path"))
 
     def test_workflow_validation_rejects_excessive_steps(self):
         with tempfile.TemporaryDirectory() as temp_dir:

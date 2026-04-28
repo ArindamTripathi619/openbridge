@@ -61,5 +61,10 @@ htmlcov/
 .tmp/
 *.tmp
 
+# Generated analysis/build artifacts
+graphify-out/
+**/graphify-out/
+dist-nuitka/
+
 # Documentation
 DOCS/

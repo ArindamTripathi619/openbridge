@@ -6,9 +6,9 @@ After=network-online.target opencode.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/DevCrewX/Projects/TelegramRemoteProgressBot
+WorkingDirectory=%h/<path-to-openbridge-workspace>
 EnvironmentFile=%h/.config/openbridge/bridge.env
-ExecStart=/home/DevCrewX/Projects/TelegramRemoteProgressBot/.venv/bin/openbridge start --foreground
+ExecStart=%h/<path-to-openbridge-workspace>/.venv/bin/openbridge start --foreground
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60

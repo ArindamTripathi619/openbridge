@@ -245,7 +245,7 @@ def _is_safe_fetch_url(url: str) -> bool:
     try:
         infos = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
     except OSError:
-        return True
+        return False
 
     for info in infos:
         address = info[4][0]
