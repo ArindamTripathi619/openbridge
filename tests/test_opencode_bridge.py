@@ -259,6 +259,176 @@ class TestOpenCodeBridgeHelpers(unittest.TestCase):
         denied_message.reply_text.assert_any_await("This chat is not allowed to view health.")
         denied_message.reply_text.assert_any_await("This chat is not allowed to view stats.")
 
+    def test_text_handler_denies_messages_from_disallowed_chats(self):
+        """Integration test: Denied chats cannot send text messages."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        denied_message = Mock()
+        denied_message.text = "Hello bot"
+        denied_message.reply_text = AsyncMock()
+        denied_update = Mock(effective_message=denied_message, effective_chat=Mock(id=222))
+
+        asyncio.run(bridge.handle_text(denied_update, Mock()))
+
+        denied_message.reply_text.assert_awaited_once_with(
+            "This chat is not allowed to use this bot."
+        )
+
+    def test_workflow_handler_denies_all_actions_from_disallowed_chats(self):
+        """Integration test: Denied chats cannot execute any workflow actions."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        denied_message = Mock()
+        denied_message.reply_text = AsyncMock()
+        denied_update = Mock(effective_message=denied_message, effective_chat=Mock(id=222))
+
+        # Test each workflow action: create, list, status, pause, resume, run
+        for action in ["create", "list", "status", "pause", "resume", "run"]:
+            denied_message.reply_text.reset_mock()
+            context = Mock(args=[action], application=Mock())
+            asyncio.run(bridge.handle_workflow_command(denied_update, context))
+            denied_message.reply_text.assert_awaited_once_with(
+                "This chat is not allowed to manage workflows."
+            )
+
+    def test_empty_allowlist_denies_all_chats(self):
+        """Boundary test: Empty allowlist with allow_all_chats=False denies all chats."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids=set(),  # Empty allowlist
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        # Any chat ID should be denied
+        self.assertFalse(bridge._is_chat_allowed(123))
+        self.assertFalse(bridge._is_chat_allowed(456))
+        self.assertFalse(bridge._is_chat_allowed(999999))
+
+    def test_allow_all_chats_overrides_allowlist(self):
+        """Boundary test: allow_all_chats=True allows all chats regardless of allowlist."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=True,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        # All chats should be allowed, even those not in the allowlist
+        self.assertTrue(bridge._is_chat_allowed(111))  # In allowlist
+        self.assertTrue(bridge._is_chat_allowed(222))  # Not in allowlist
+        self.assertTrue(bridge._is_chat_allowed(999999))  # Large ID
+
+    def test_single_allowed_chat_edge_case(self):
+        """Boundary test: Single allowed chat ID is properly enforced."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={42},  # Single chat
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        self.assertTrue(bridge._is_chat_allowed(42))
+        self.assertFalse(bridge._is_chat_allowed(41))
+        self.assertFalse(bridge._is_chat_allowed(43))
+
+    def test_denied_chat_never_receives_protected_payloads(self):
+        """Integration test: Denied chat receives denial message without processing payload."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        denied_message = Mock()
+        denied_message.reply_text = AsyncMock()
+        denied_update = Mock(effective_message=denied_message, effective_chat=Mock(id=222))
+        context = Mock(args=["list"], application=Mock())
+
+        # Ensure workflow manager is not called for denied chat
+        mock_manager = Mock()
+        bridge.set_workflow_manager(mock_manager)
+
+        asyncio.run(bridge.handle_workflow_command(denied_update, context))
+
+        # Verify denial message was sent
+        denied_message.reply_text.assert_awaited_once_with(
+            "This chat is not allowed to manage workflows."
+        )
+        # Verify workflow manager was never called
+        mock_manager.summary_text.assert_not_called()
+
+    def test_allowed_chat_passes_allowlist_check(self):
+        """Test: Allowed chat passes allowlist check and proceeds with handler."""
+        config = BridgeConfig(
+            telegram_token="123:token",
+            opencode_model="opencode/big-pickle",
+            opencode_working_dir=".",
+            opencode_timeout_seconds=10,
+            max_concurrent_jobs=1,
+            allowed_chat_ids={111},
+            allow_all_chats=False,
+            log_level="INFO",
+        )
+        bridge = OpenCodeBridge(config)
+
+        allowed_message = Mock()
+        allowed_message.reply_text = AsyncMock()
+        allowed_update = Mock(effective_message=allowed_message, effective_chat=Mock(id=111))
+        context = Mock(args=["list"], application=Mock())
+
+        # Set up mock manager
+        mock_manager = Mock()
+        mock_manager.summary_text.return_value = "Active workflows"
+        bridge.set_workflow_manager(mock_manager)
+
+        asyncio.run(bridge.handle_workflow_command(allowed_update, context))
+
+        # Verify workflow manager was called (passed allowlist check)
+        mock_manager.summary_text.assert_called_once()
+        allowed_message.reply_text.assert_awaited_once_with("Active workflows")
+
     def test_send_session_message_prefers_parts_payload(self):
         config = BridgeConfig(
             telegram_token="123:token",
