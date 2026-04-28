@@ -24,6 +24,7 @@ from src.openbridge.app import (
     get_resource_path,
     is_process_alive,
     read_env_file,
+    render_systemd_command,
     write_env_file,
     workflows_init_command,
 )
@@ -210,6 +211,25 @@ class TestAppConfig(unittest.TestCase):
         self.assertIn("PrivateTmp=true", unit_text)
         self.assertIn("PrivateDevices=true", unit_text)
 
+    def test_render_systemd_command_prints_host_correct_units(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = Path(temp_dir)
+            args = Mock(workspace=workspace_dir)
+
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                render_systemd_command(args)
+
+            output = buffer.getvalue()
+            self.assertIn("openbridge.service", output)
+            self.assertIn("opencode.service", output)
+            self.assertIn(str(workspace_dir.resolve()), output)
+            self.assertFalse((workspace_dir / "openbridge.service").exists())
+            self.assertFalse((workspace_dir / "opencode.service").exists())
+
+            self.assertIn("Wants=opencode.service", output)
+            self.assertIn("ExecStart=", output)
+
     def test_sync_opencode_env_contains_only_service_keys(self):
         from src.openbridge import app as app_module
 
@@ -269,6 +289,14 @@ class TestAppConfig(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         self.assertIn("openbridge 1.0.1", buffer.getvalue())
+
+    def test_parser_includes_render_systemd_command(self):
+        parser = build_parser()
+
+        parsed = parser.parse_args(["render-systemd", "--workspace", "."])
+
+        self.assertEqual(parsed.command, "render-systemd")
+        self.assertEqual(parsed.func.__name__, "render_systemd_command")
 
     def test_show_banner_prints_colored_ascii_art(self):
         from src.openbridge import app as app_module

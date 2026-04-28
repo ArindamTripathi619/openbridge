@@ -455,6 +455,13 @@ def _build_opencode_systemd_unit(workspace_dir: Path) -> str:
     )
 
 
+def _render_systemd_units(workspace_dir: Path) -> Dict[str, str]:
+    return {
+        SYSTEMD_UNIT_NAME: _build_systemd_unit(workspace_dir),
+        OPENCODE_SYSTEMD_UNIT_NAME: _build_opencode_systemd_unit(workspace_dir),
+    }
+
+
 def _systemctl(*args: str, check: bool = True) -> None:
     if shutil.which("systemctl") is None:
         raise FileNotFoundError("systemctl not found")
@@ -730,8 +737,9 @@ def install_systemd_command(args: argparse.Namespace) -> None:
     _sync_opencode_env_from_bridge_config(CONFIG_FILE)
 
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    _install_opencode_systemd_unit(workspace_dir)
-    SYSTEMD_UNIT_FILE.write_text(_build_systemd_unit(workspace_dir), encoding="utf-8")
+    rendered_units = _render_systemd_units(workspace_dir)
+    OPENCODE_SYSTEMD_UNIT_FILE.write_text(rendered_units[OPENCODE_SYSTEMD_UNIT_NAME], encoding="utf-8")
+    SYSTEMD_UNIT_FILE.write_text(rendered_units[SYSTEMD_UNIT_NAME], encoding="utf-8")
 
     print(f"Installed systemd units to {SYSTEMD_UNIT_FILE} and {OPENCODE_SYSTEMD_UNIT_FILE}")
 
@@ -754,6 +762,20 @@ def install_systemd_command(args: argparse.Namespace) -> None:
         print(f"Enabled {SYSTEMD_UNIT_NAME}")
     else:
         print(f"Reloaded user systemd; {SYSTEMD_UNIT_NAME} was not enabled")
+
+
+def render_systemd_command(args: argparse.Namespace) -> None:
+    workspace_dir = Path(args.workspace).resolve() if args.workspace else Path.cwd().resolve()
+
+    if not workspace_dir.exists():
+        print(f"Workspace not found: {workspace_dir}")
+        raise SystemExit(1)
+
+    rendered_units = _render_systemd_units(workspace_dir)
+    print(f"# {SYSTEMD_UNIT_NAME}")
+    print(rendered_units[SYSTEMD_UNIT_NAME], end="")
+    print(f"# {OPENCODE_SYSTEMD_UNIT_NAME}")
+    print(rendered_units[OPENCODE_SYSTEMD_UNIT_NAME], end="")
 
 
 def uninstall_systemd_command(_: argparse.Namespace) -> None:
@@ -1195,6 +1217,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restart the service after installing it",
     )
     install_systemd_parser.set_defaults(func=install_systemd_command)
+
+    render_systemd_parser = subparsers.add_parser(
+        "render-systemd",
+        help="Render the systemd units for the current host without writing files",
+    )
+    render_systemd_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path.cwd(),
+        help="Workspace directory to resolve into the rendered units",
+    )
+    render_systemd_parser.set_defaults(func=render_systemd_command)
 
     uninstall_systemd_parser = subparsers.add_parser("uninstall-systemd", help="Remove the user systemd unit")
     uninstall_systemd_parser.set_defaults(func=uninstall_systemd_command)

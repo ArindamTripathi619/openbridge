@@ -422,7 +422,7 @@ No direct `!gws`/`/gws` execution path exists in this architecture. Google Works
 
 ## Systemd (User Service)
 
-`openbridge setup` installs the OpenCode service automatically when `systemctl --user` is available.
+`openbridge setup` writes the OpenCode service unit automatically when `systemctl --user` is available.
 
 Install and start the OpenBridge bridge service:
 
@@ -434,6 +434,12 @@ Install without enabling:
 
 ```bash
 openbridge install-systemd --no-enable
+```
+
+Preview the resolved, host-correct units without writing them:
+
+```bash
+openbridge render-systemd --workspace /path/to/workspace
 ```
 
 The bridge service is the lifecycle owner. Its systemd unit pulls in `opencode.service` as a dependency, so startup and shutdown are managed through `openbridge.service` rather than by controlling `opencode.service` directly.
