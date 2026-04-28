@@ -814,17 +814,61 @@ class WorkflowManager:
 
         raise ValueError(f"Unsupported transform mode: {mode}")
 
-    async def _run_opencode_step(self, workflow: WorkflowDefinition, current_text: str, step: WorkflowStep) -> str:
+    @staticmethod
+    def _truncate_text(text: str, limit: int) -> str:
+        cleaned = str(text).strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+    def _build_bounded_opencode_prompt(self, workflow: WorkflowDefinition, current_text: str, step: WorkflowStep) -> str:
         prompt_template = str(
             step.params.get("prompt_template")
             or step.params.get("prompt")
             or "Summarize the following content for Telegram:\n\n{input}"
         )
-        prompt = (
-            prompt_template.replace("{input}", current_text)
-            .replace("{workflow_id}", workflow.id)
-            .replace("{workflow_name}", workflow.name)
-        )
+        prompt_template = prompt_template.replace("{workflow_id}", workflow.id).replace("{workflow_name}", workflow.name)
+
+        max_chars = int(getattr(self.config, "workflow_prompt_max_chars", 12000))
+        overflow_mode = str(getattr(self.config, "workflow_prompt_overflow_mode", "reject")).strip().lower()
+        if overflow_mode not in {"reject", "truncate"}:
+            overflow_mode = "reject"
+
+        if "{input}" in prompt_template:
+            prefix, suffix = prompt_template.split("{input}", 1)
+            static_len = len(prefix) + len(suffix)
+            if static_len > max_chars:
+                message = (
+                    f"Workflow {workflow.id} prompt template exceeds the configured limit of {max_chars} characters"
+                )
+                logger.warning(message)
+                if overflow_mode == "truncate":
+                    return self._truncate_text(prefix + suffix, max_chars)
+                raise ValueError(message)
+
+            prompt_budget = max_chars - static_len
+            if len(current_text) <= prompt_budget:
+                return prefix + current_text + suffix
+
+            message = (
+                f"Workflow {workflow.id} prompt input is too large ({len(current_text)} chars > {prompt_budget} char limit)"
+            )
+            logger.warning(message)
+            if overflow_mode == "truncate":
+                return prefix + self._truncate_text(current_text, prompt_budget) + suffix
+            raise ValueError(message)
+
+        if len(prompt_template) <= max_chars:
+            return prompt_template
+
+        message = f"Workflow {workflow.id} prompt is too large ({len(prompt_template)} chars > {max_chars} char limit)"
+        logger.warning(message)
+        if overflow_mode == "truncate":
+            return self._truncate_text(prompt_template, max_chars)
+        raise ValueError(message)
+
+    async def _run_opencode_step(self, workflow: WorkflowDefinition, current_text: str, step: WorkflowStep) -> str:
+        prompt = self._build_bounded_opencode_prompt(workflow, current_text, step)
         workflow_session_id = _workflow_session_chat_id(workflow.id)
         return await self.bridge.run_prompt(workflow_session_id, prompt)
 

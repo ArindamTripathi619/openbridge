@@ -251,6 +251,8 @@ openbridge --version
 - `validate` checks the workflow file for schema and syntax errors
 - `run --id <workflow>` executes one workflow immediately using the configured bot and OpenCode bridge
 - `pause --id <workflow>` and `resume --id <workflow>` control scheduler execution without editing definitions
+- `opencode_prompt` workflow steps are bounded by `OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS`
+- set `OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE=truncate` to truncate oversized generated prompts instead of rejecting them
 
 Workflow definitions are JSON-based so the app can load, validate, and execute them without extra dependencies.
 Supported schedules include `daily@HH:MM`, `every:<seconds>` / `interval:<seconds>`, and cron-style expressions (`cron:*/15 * * * *`).

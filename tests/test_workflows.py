@@ -37,6 +37,15 @@ class FakeBridge:
         return f"workflow:{chat_id}:{prompt}"
 
 
+class CaptureBridge:
+    def __init__(self):
+        self.prompts = []
+
+    async def run_prompt(self, chat_id, prompt):
+        self.prompts.append((chat_id, prompt))
+        return "ok"
+
+
 class TestWorkflows(unittest.TestCase):
     def test_load_sample_workflows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -100,6 +109,114 @@ class TestWorkflows(unittest.TestCase):
             self.assertEqual(bot.messages[0]["chat_id"], 123456789)
             self.assertIn("workflow:", bot.messages[0]["text"])
             self.assertTrue(state_file.exists())
+
+    def test_run_workflow_rejects_oversized_generated_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflows_file = Path(temp_dir) / "workflows.json"
+            state_file = Path(temp_dir) / "state.json"
+            save_workflows(
+                workflows_file,
+                {
+                    "workflows": [
+                        {
+                            "id": "prompt_guard",
+                            "name": "Prompt Guard",
+                            "enabled": True,
+                            "schedule": "daily@06:55",
+                            "targets": [123456789],
+                            "steps": [
+                                {"type": "http_fetch", "sources": ["https://example.com/news"]},
+                                {"type": "opencode_prompt", "prompt_template": "Summarize:\n\n{input}"},
+                            ],
+                        }
+                    ]
+                },
+            )
+
+            config = BridgeConfig.from_mapping(
+                {
+                    "TELEGRAM_BOT_TOKEN": "123:token",
+                    "OPENCODE_MODEL": "opencode/big-pickle",
+                    "OPENCODE_WORKING_DIR": temp_dir,
+                    "OPENCODE_TIMEOUT_SECONDS": "60",
+                    "OPENCODE_MAX_CONCURRENT": "1",
+                    "OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS": "20",
+                    "OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE": "reject",
+                }
+            )
+            bridge = CaptureBridge()
+            manager = WorkflowManager(
+                config=config,
+                bridge=bridge,
+                workflows_file=workflows_file,
+                state_file=state_file,
+            )
+
+            async def fake_http_fetch(step):
+                return "x" * 200
+
+            manager._run_http_fetch_step = fake_http_fetch  # type: ignore[method-assign]
+
+            result = asyncio.run(manager.run_workflow("prompt_guard", telegram_bot=None, manual=True))
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("prompt input is too large", result.error or "")
+            self.assertEqual(bridge.prompts, [])
+
+    def test_run_workflow_truncates_oversized_generated_prompt_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflows_file = Path(temp_dir) / "workflows.json"
+            state_file = Path(temp_dir) / "state.json"
+            save_workflows(
+                workflows_file,
+                {
+                    "workflows": [
+                        {
+                            "id": "prompt_guard",
+                            "name": "Prompt Guard",
+                            "enabled": True,
+                            "schedule": "daily@06:55",
+                            "targets": [123456789],
+                            "steps": [
+                                {"type": "http_fetch", "sources": ["https://example.com/news"]},
+                                {"type": "opencode_prompt", "prompt_template": "Summarize:\n\n{input}"},
+                            ],
+                        }
+                    ]
+                },
+            )
+
+            config = BridgeConfig.from_mapping(
+                {
+                    "TELEGRAM_BOT_TOKEN": "123:token",
+                    "OPENCODE_MODEL": "opencode/big-pickle",
+                    "OPENCODE_WORKING_DIR": temp_dir,
+                    "OPENCODE_TIMEOUT_SECONDS": "60",
+                    "OPENCODE_MAX_CONCURRENT": "1",
+                    "OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS": "20",
+                    "OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE": "truncate",
+                }
+            )
+            bridge = CaptureBridge()
+            manager = WorkflowManager(
+                config=config,
+                bridge=bridge,
+                workflows_file=workflows_file,
+                state_file=state_file,
+            )
+
+            async def fake_http_fetch(step):
+                return "x" * 200
+
+            manager._run_http_fetch_step = fake_http_fetch  # type: ignore[method-assign]
+
+            result = asyncio.run(manager.run_workflow("prompt_guard", telegram_bot=None, manual=True))
+
+            self.assertEqual(result.status, "success")
+            self.assertEqual(len(bridge.prompts), 1)
+            _, prompt = bridge.prompts[0]
+            self.assertLessEqual(len(prompt), 20)
+            self.assertIn("…", prompt)
 
     def test_validate_rejects_invalid_workflow_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -41,6 +41,8 @@ DEFAULT_LITELLM_PORT = 8000
 DEFAULT_LITELLM_MODEL = "groq-gpt-oss-mini"
 DEFAULT_OPENCODE_API_BASE_URL = "http://127.0.0.1:4096"
 DEFAULT_OPENCODE_API_TIMEOUT_SECONDS = 120
+DEFAULT_WORKFLOW_PROMPT_MAX_CHARS = 12000
+DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE = "reject"
 LEGACY_ENV_PREFIX = "TELEWATCH_"
 CURRENT_ENV_PREFIX = "OPENBRIDGE_"
 SENSITIVE_LOG_PATTERNS = (
@@ -169,6 +171,8 @@ class BridgeConfig:
     opencode_api_username: str = "opencode"
     opencode_api_password: Optional[str] = None
     opencode_api_timeout_seconds: int = DEFAULT_OPENCODE_API_TIMEOUT_SECONDS
+    workflow_prompt_max_chars: int = DEFAULT_WORKFLOW_PROMPT_MAX_CHARS
+    workflow_prompt_overflow_mode: str = DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, str]) -> "BridgeConfig":
@@ -217,6 +221,21 @@ class BridgeConfig:
         )
         if opencode_api_timeout_seconds <= 0:
             raise ValueError("OPENCODE_API_TIMEOUT_SECONDS must be > 0")
+
+        workflow_prompt_max_chars = int(
+            mapping.get("OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS", str(DEFAULT_WORKFLOW_PROMPT_MAX_CHARS))
+        )
+        if workflow_prompt_max_chars <= 0:
+            raise ValueError("OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS must be > 0")
+
+        workflow_prompt_overflow_mode = (
+            mapping.get("OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE", DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE)
+            .strip()
+            .lower()
+            or DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE
+        )
+        if workflow_prompt_overflow_mode not in {"reject", "truncate"}:
+            raise ValueError("OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE must be 'reject' or 'truncate'")
 
         (
             decorator_enabled,
@@ -286,6 +305,8 @@ class BridgeConfig:
             opencode_api_username=opencode_api_username,
             opencode_api_password=opencode_api_password,
             opencode_api_timeout_seconds=opencode_api_timeout_seconds,
+            workflow_prompt_max_chars=workflow_prompt_max_chars,
+            workflow_prompt_overflow_mode=workflow_prompt_overflow_mode,
         )
 
     @classmethod

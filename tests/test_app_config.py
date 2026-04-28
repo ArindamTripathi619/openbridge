@@ -96,6 +96,22 @@ class TestAppConfig(unittest.TestCase):
         self.assertFalse(config.allow_all_chats)
         self.assertEqual(config.log_level, "INFO")
 
+    def test_bridge_config_parses_workflow_prompt_guardrails(self):
+        config = BridgeConfig.from_mapping(
+            {
+                "TELEGRAM_BOT_TOKEN": "123:token",
+                "OPENCODE_MODEL": "opencode/big-pickle",
+                "OPENCODE_WORKING_DIR": "/tmp/project",
+                "OPENCODE_TIMEOUT_SECONDS": "600",
+                "OPENCODE_MAX_CONCURRENT": "1",
+                "OPENBRIDGE_WORKFLOW_PROMPT_MAX_CHARS": "2048",
+                "OPENBRIDGE_WORKFLOW_PROMPT_OVERFLOW_MODE": "truncate",
+            }
+        )
+
+        self.assertEqual(config.workflow_prompt_max_chars, 2048)
+        self.assertEqual(config.workflow_prompt_overflow_mode, "truncate")
+
     def test_bridge_config_denies_all_chats_by_default(self):
         config = BridgeConfig.from_mapping(
             {
