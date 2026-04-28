@@ -153,6 +153,7 @@ PYTHON_BIN=./.venv/bin/python bash scripts/preflight.sh
 
 This command installs dev dependencies and runs lint (`flake8` with complexity threshold), type checks (`mypy`), tests, and package build checks.
 Current static gates target core control-flow paths in `src/openbridge/app.py` and `src/openbridge/workflows.py`, plus type checks on `src/openbridge/workflows.py`.
+It also runs a config/docs drift check to keep runtime-sensitive defaults aligned with `config/opencode-bridge.env.example` and `config/example.yaml`.
 
 ## Install From Release Artifacts (Linux)
 
