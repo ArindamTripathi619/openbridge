@@ -25,6 +25,7 @@ from src.openbridge.app import (
     is_process_alive,
     read_env_file,
     write_env_file,
+    workflows_init_command,
 )
 from src.openbridge.opencode_bridge import BridgeConfig
 
@@ -471,6 +472,21 @@ class TestAppConfig(unittest.TestCase):
 
                 mock_ensure_service.assert_called_once()
                 mock_run_bridge.assert_called_once()
+
+    def test_workflows_init_warns_on_placeholder_targets(self):
+        from src.openbridge import app as app_module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflows_file = Path(temp_dir) / "workflows.json"
+            args = Mock(workflows_file=workflows_file, force=False)
+
+            with patch.object(app_module, "WORKFLOWS_FILE", workflows_file), patch("builtins.print") as mock_print:
+                workflows_init_command(args)
+
+            self.assertTrue(workflows_file.exists())
+            printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+            self.assertIn("placeholder Telegram targets", printed)
+            self.assertIn("daily_news_digest", printed)
 
     def test_stop_command_stops_systemd_service_when_pid_missing(self):
         from src.openbridge import app as app_module

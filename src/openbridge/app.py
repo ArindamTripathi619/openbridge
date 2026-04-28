@@ -615,8 +615,31 @@ def workflows_init_command(args: argparse.Namespace) -> None:
         print("Use --force to overwrite it.")
         return
 
-    save_workflows(workflows_file, sample_workflows())
+    payload = sample_workflows()
+    save_workflows(workflows_file, payload)
     print(f"Wrote sample workflows to {workflows_file}")
+
+    workflows = payload.get("workflows", []) if isinstance(payload, dict) else []
+    placeholder_workflows = []
+    for workflow in workflows:
+        if not isinstance(workflow, dict):
+            continue
+        targets = workflow.get("targets", [])
+        if isinstance(targets, list):
+            for target in targets:
+                try:
+                    if int(target) == 0:
+                        placeholder_workflows.append(str(workflow.get("id", "unknown")))
+                        break
+                except (TypeError, ValueError):
+                    continue
+
+    if placeholder_workflows:
+        workflow_list = ", ".join(sorted(placeholder_workflows))
+        print(
+            "Warning: sample workflows still use placeholder Telegram targets (0). "
+            f"Replace them before enabling the workflows: {workflow_list}"
+        )
 
 
 def workflows_validate_command(args: argparse.Namespace) -> None:

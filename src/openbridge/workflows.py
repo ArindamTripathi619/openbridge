@@ -435,7 +435,7 @@ def sample_workflows() -> Dict[str, Any]:
                 "enabled": True,
                 "timezone": "local",
                 "schedule": "daily@06:55",
-                "targets": [123456789],
+                "targets": [0],
                 "steps": [
                     {
                         "type": "http_fetch",

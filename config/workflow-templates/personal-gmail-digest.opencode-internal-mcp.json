@@ -4,7 +4,7 @@
   "enabled": true,
   "timezone": "local",
   "schedule": "cron:0 9 * * *",
-  "targets": [123456789],
+  "targets": [0],
   "metadata": {
     "owner": "openbridge",
     "mode": "opencode_internal_mcp",

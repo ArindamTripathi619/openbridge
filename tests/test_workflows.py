@@ -48,6 +48,7 @@ class TestWorkflows(unittest.TestCase):
             self.assertEqual(len(workflows), 1)
             self.assertEqual(workflows[0].id, "daily_news_digest")
             self.assertEqual(workflows[0].steps[0].type, "http_fetch")
+            self.assertEqual(workflows[0].targets, [0])
 
     def test_run_workflow_sends_telegram_message(self):
         with tempfile.TemporaryDirectory() as temp_dir:
