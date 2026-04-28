@@ -4,13 +4,88 @@ Minimal Telegram application that forwards messages to an OpenCode API server (`
 
 ## Architecture
 
-- API-first runtime: no per-message OpenCode subprocess calls.
-- One OpenCode session per Telegram chat for conversational continuity.
-- Optional dual LLM pipeline:
-  - input prompt enhancement before OpenCode submission
-  - output prettification before Telegram delivery
-- Runtime observability via `/health` and `/stats`.
-- Telegram token redaction in logs.
+### Design Principles
+- **API-first runtime**: no per-message OpenCode subprocess calls.
+- **Session continuity**: one OpenCode session per Telegram chat for conversational context.
+- **Layered services**: focused modules with clear responsibilities.
+- **Observability**: runtime health checks and stats via `/health` and `/stats`.
+- **Security**: Telegram token redaction in logs, configuration isolation.
+
+### Module Structure
+The bridge is organized into focused, composable services:
+
+#### 1. **Core Bridge** (`OpenCodeBridge`)
+- Composition root: coordinates all services
+- Telegram message handling and dispatch
+- Per-chat task queuing with overflow management
+- Session lifecycle management
+- Statistics tracking and health reporting
+- Workflow management (drafting, authoring, execution)
+
+#### 2. **OpenCode API Client** (`OpenCodeAPIClient`)
+- Encapsulates all OpenCode API interactions
+- Session creation and lifecycle
+- Message posting and retrieval
+- Adaptive backoff with jitter for polling (configurable)
+- Error handling and retry semantics
+
+#### 3. **LLM Service** (`LLMService`)
+- Input prompt enhancement via configurable LLM
+- Output decoration and formatting via configurable LLM
+- JSON response parsing and validation
+- Graceful fallback on LLM errors
+
+#### 4. **Message Formatting & Rendering**
+- Telegram MarkdownV2 escaping and safe chunking
+- Response decoration and sectioning
+- Text truncation for Telegram limits
+
+#### 5. **Workflow Management** (internal to bridge)
+- Workflow definition authoring (from natural language prompts)
+- Workflow scheduling and execution via cron/intervals
+- Workflow persistence (JSON file based)
+
+#### 6. **Configuration** (`BridgeConfig`)
+- Centralized environment variable parsing
+- Validation of all configuration knobs
+- Runtime-accessible settings for all services
+
+### Data Flow
+
+```
+Telegram → OpenBridge (dispatcher) → OpenCodeAPIClient (session/polling)
+                              ↓
+                         LLMService (enhancement/decoration)
+                              ↓
+                         Message formatting & chunking
+                              ↓
+                         Telegram
+```
+
+### Optional Features (Dual LLM Pipeline)
+- **Input stage**: Optional prompt enhancement before OpenCode submission (improves quality)
+- **Output stage**: Optional output prettification before Telegram delivery (better readability)
+
+### Modularization Roadmap
+
+**Phase 1** (✅ Complete): Extract focused service modules
+- LLMService: Encapsulates all LLM operations
+- OpenCodeAPIClient: Encapsulates all API operations
+- Module boundaries clearly established
+
+**Phase 2** (Planned): Full integration and simplification
+- Integrate services into OpenCodeBridge as composition root
+- Extract rendering module (message formatting, chunking)
+- Extract workflow module (authoring, scheduling, execution)
+- Extract stats/telemetry module
+- Remove redundant code from main bridge class
+
+### Configuration Knobs
+All services respect centralized environment configuration:
+- `OPENBRIDGE_OPENCODE_BACKOFF_*`: Adaptive backoff strategy for polling
+- `OPENBRIDGE_CHAT_QUEUE_*`: Per-chat task queue limits and overflow behavior
+- `OPENBRIDGE_WORKFLOW_PROMPT_*`: Workflow prompt size bounds and overflow handling
+- `OPENBRIDGE_INPUT_LLM_*` / `OPENBRIDGE_OUTPUT_LLM_*`: LLM runtime configuration
 
 ## Screenshots
 
