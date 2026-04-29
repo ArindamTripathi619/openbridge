@@ -40,10 +40,11 @@ The bridge is organized into focused, composable services:
 - Response decoration and sectioning
 - Text truncation for Telegram limits
 
-#### 5. **Workflow Management** (internal to bridge)
-- Workflow definition authoring (from natural language prompts)
-- Workflow scheduling and execution via cron/intervals
-- Workflow persistence (JSON file based)
+#### 5. **Workflow Management** (`workflow_management.py`)
+- Workflow definition authoring from natural language prompts
+- Workflow validation and safety checks
+- Workflow persistence and execution helpers
+- `/workflow` command handling and pending reply flow
 
 #### 6. **Configuration** (`BridgeConfig`)
 - Centralized environment variable parsing
@@ -73,12 +74,13 @@ Telegram → OpenBridge (dispatcher) → OpenCodeAPIClient (session/polling)
 - OpenCodeAPIClient: Encapsulates all API operations
 - Module boundaries clearly established
 
-**Phase 2** (Planned): Full integration and simplification
+**Phase 2** (✅ Complete): Full integration and simplification
 - Integrate services into OpenCodeBridge as composition root
 - Extract rendering module (message formatting, chunking)
 - Extract workflow module (authoring, scheduling, execution)
-- Extract stats/telemetry module
 - Remove redundant code from main bridge class
+
+**Result**: the bridge now delegates rendering to `bridge_presentation.py` and workflow logic to `workflow_management.py`.
 
 ### Configuration Knobs
 All services respect centralized environment configuration:

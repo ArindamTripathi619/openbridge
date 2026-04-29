@@ -16,7 +16,6 @@ import os
 import re
 import time
 import threading
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Set
@@ -30,12 +29,33 @@ from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from openbridge.llm_service import LLMService
+from openbridge.bridge_presentation import (
+    BridgePresentationContext,
+    _chunk_message,
+    _escape_markdown_v2,
+    _find_markdown_safe_split_index,
+    _redact_sensitive_text,
+    format_health_message,
+    format_stats_message,
+    render_decorated_messages,
+    send_result_messages,
+)
+from openbridge.workflow_management import (
+    coerce_single_workflow,
+    draft_workflow_from_instruction,
+    extract_json_object_text,
+    format_workflow_preview,
+    handle_pending_workflow_reply,
+    run_workflow_now,
+    save_workflow_definition,
+    slugify_workflow_id,
+    validate_workflow_safety,
+    workflow_file_path,
+)
 from openbridge.opencode_api_client import OpenCodeAPIClient
 
 logger = logging.getLogger("opencode_bridge")
 
-TELEGRAM_LIMIT = 4096
-SAFE_CHUNK = TELEGRAM_LIMIT
 DEFAULT_FALLBACK_MODELS = (
     "opencode/minimax-m2.5-free",
     "opencode/nemotron-3-super-free",
@@ -55,97 +75,6 @@ DEFAULT_OPENCODE_BACKOFF_FACTOR = 2.0
 DEFAULT_OPENCODE_BACKOFF_JITTER_PCT = 0.2
 LEGACY_ENV_PREFIX = "TELEWATCH_"
 CURRENT_ENV_PREFIX = "OPENBRIDGE_"
-SENSITIVE_LOG_PATTERNS = (
-    re.compile(r"(https?://api\.telegram\.org/bot)(\d{6,12}:[A-Za-z0-9_-]+)(/)", re.IGNORECASE),
-    re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{20,})\b"),
-    re.compile(r"\b(?:sk|gsk|rk|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b", re.IGNORECASE),
-    re.compile(r"\b[A-Za-z0-9_-]{20,}:[A-Za-z0-9._~+/=-]{16,}\b"),
-    re.compile(
-        r"(?i)\b(authorization|api[-_ ]?key|token|password|secret)\b\s*[:=]\s*([\"']?)[^\s\"']+\2"
-    ),
-)
-
-MDV2_SPECIAL_CHARS = r"_*[]()~`>#+-=|{}.!"
-MDV2_LITERAL_SPECIAL_CHARS = r">#+-={}.!"
-MDV2_CODE_BLOCK_RE = re.compile(r"(```[\s\S]*?```|`[^`\n]*`)")
-MDV2_ENTITY_PATTERN = re.compile(
-    r"\*[^\*\n]+\*|"
-    r"_[^_\n]+_|"
-    r"\[[^\]]*\]\([^\)]*\)"
-)
-MDV2_MAX_FALLBACK_DEPTH = 4
-MDV2_STRICT_FALLBACK_THRESHOLD = 400
-
-
-def _escape_markdown_v2(text: str, *, preserve_formatting: bool = False) -> str:
-    text = str(text)
-    special_chars = MDV2_SPECIAL_CHARS
-
-    def _escape_chars(raw: str, chars: str = MDV2_SPECIAL_CHARS) -> str:
-        escaped: List[str] = []
-        i = 0
-        while i < len(raw):
-            ch = raw[i]
-            if ch == "\\":
-                if i + 1 < len(raw) and raw[i + 1] in ("n", "\\", *MDV2_SPECIAL_CHARS):
-                    escaped.append("\\")
-                    escaped.append(raw[i + 1])
-                    i += 2
-                    continue
-                escaped.append("\\\\")
-                i += 1
-                continue
-
-            if ch in chars:
-                escaped.append("\\")
-            escaped.append(ch)
-            i += 1
-        return "".join(escaped)
-
-    def _escape_plain_segment(segment: str) -> str:
-        if not preserve_formatting:
-            return _escape_chars(segment, special_chars)
-
-        placeholders: dict[str, str] = {}
-        protected = segment
-        for i, match in enumerate(MDV2_ENTITY_PATTERN.finditer(segment)):
-            entity = match.group(0)
-            token = f"MDV2ENTITY{i}END"
-            if entity.startswith("["):
-                parts = entity.split("](", 1)
-                if len(parts) == 2:
-                    label = parts[0][1:]
-                    url_and_close = parts[1]
-                    if url_and_close.endswith(")"):
-                        url = url_and_close[:-1]
-                        escaped_label = _escape_chars(label, special_chars)
-                        escaped_url = _escape_chars(url, special_chars)
-                        entity = "[" + escaped_label + "](" + escaped_url + ")"
-            elif entity.startswith("*") and entity.endswith("*"):
-                entity = "*" + _escape_chars(entity[1:-1], special_chars) + "*"
-            elif entity.startswith("_") and entity.endswith("_"):
-                entity = "_" + _escape_chars(entity[1:-1], special_chars) + "_"
-            placeholders[token] = entity
-            protected = protected.replace(match.group(0), token, 1)
-
-        output_segment = _escape_chars(protected, special_chars)
-        for token, original in placeholders.items():
-            output_segment = output_segment.replace(token, original)
-        return output_segment
-
-    output: List[str] = []
-    last_end = 0
-    for match in MDV2_CODE_BLOCK_RE.finditer(text):
-        start, end = match.span()
-        if start > last_end:
-            output.append(_escape_plain_segment(text[last_end:start]))
-        output.append(match.group(0))
-        last_end = end
-
-    if last_end < len(text):
-        output.append(_escape_plain_segment(text[last_end:]))
-
-    return "".join(output)
 
 
 @dataclass
@@ -481,97 +410,10 @@ def _parse_llm_role_config(
     return enabled, provider, api_key, model, base_url, litellm_port, timeout_seconds
 
 
-def _redact_sensitive_text(text: str) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        if match.lastindex and match.lastindex >= 3:
-            return f"{match.group(1)}[REDACTED]{match.group(3)}"
-        if match.lastindex and match.lastindex >= 1:
-            return f"{match.group(1)}=[REDACTED]"
-        return "[REDACTED]"
-
-    redacted = text
-    for pattern in SENSITIVE_LOG_PATTERNS:
-        redacted = pattern.sub(_replace, redacted)
-    return redacted
-
-
 class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         rendered = super().format(record)
         return _redact_sensitive_text(rendered)
-
-
-def _chunk_message(text: str, limit: int = SAFE_CHUNK) -> Iterable[str]:
-    if len(text) <= limit:
-        yield text
-        return
-
-    start = 0
-    while start < len(text):
-        remaining = text[start:]
-        if len(remaining) <= limit:
-            yield remaining if remaining.strip() else "(empty)"
-            return
-
-        split = _find_section_split_index(remaining, limit)
-        if split <= 0:
-            split = _find_markdown_safe_split_index(remaining, limit)
-        if split <= 0 or split >= len(remaining):
-            split = limit
-
-        chunk = remaining[:split]
-        yield chunk if chunk.strip() else "(empty)"
-        start += split
-
-
-def _find_markdown_safe_split_index(text: str, target: int) -> int:
-    if target <= 0 or target >= len(text):
-        return min(max(target, 0), len(text))
-
-    inside_fence = False
-    safe_before_target = -1
-    safe_after_target = -1
-    index = 0
-
-    for line in text.splitlines(keepends=True):
-        line_end = index + len(line)
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            inside_fence = not inside_fence
-
-        if not inside_fence:
-            if line_end <= target:
-                safe_before_target = line_end
-            elif safe_after_target == -1:
-                safe_after_target = line_end
-
-        index = line_end
-
-    if safe_before_target != -1:
-        return safe_before_target
-    if safe_after_target != -1 and safe_after_target < len(text):
-        return safe_after_target
-    return target
-
-
-def _find_section_split_index(text: str, target: int) -> int:
-    if target <= 0 or target >= len(text):
-        return min(max(target, 0), len(text))
-
-    candidates: List[int] = []
-    for marker in ("\n\n*", "\n\n•", "\n\n- ", "\n\n"):
-        index = text.rfind(marker, 0, target)
-        if index > 100:
-            candidates.append(index + 2)
-
-    if not candidates:
-        return -1
-
-    split = max(candidates)
-    # Do not split in the middle of a fenced code block.
-    if text[:split].count("```") % 2 != 0:
-        return -1
-    return split
 
 
 def _extract_session_id(payload: object) -> Optional[str]:
@@ -967,163 +809,59 @@ class OpenCodeBridge:
         return self._llm_service._parse_decorator_json(text)
 
     def _render_decorated_messages(self, payload: dict) -> List[str]:
-        messages: List[str] = []
-
-        title = _escape_markdown_v2(str(payload.get("title") or "OpenCode Result"))
-        summary = _escape_markdown_v2(str(payload.get("summary") or "").strip())
-        if summary:
-            messages.append(f"*{title}*\n{summary}")
-        else:
-            messages.append(f"*{title}*")
-
-        def render_section(label: str, items: List[str]) -> Optional[str]:
-            cleaned_items = [self._truncate_text(item, 420) for item in items if str(item).strip()]
-            if not cleaned_items:
-                return None
-            lines = [f"*{_escape_markdown_v2(label)}*"]
-            for item in cleaned_items[:6]:
-                lines.append(f"• {_escape_markdown_v2(item)}")
-            return "\n".join(lines)
-
-        for label, key in (("Highlights", "highlights"), ("Actions", "actions"), ("Warnings", "warnings")):
-            rendered = render_section(label, payload.get(key) or [])
-            if rendered:
-                messages.append(rendered)
-
-        return [message for message in messages if message.strip()]
+        return render_decorated_messages(payload)
 
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:
-        cleaned = str(text).strip()
-        if len(cleaned) <= limit:
-            return cleaned
-        return cleaned[: max(0, limit - 1)].rstrip() + "…"
+        from openbridge.bridge_presentation import _truncate_text
+
+        return _truncate_text(text, limit)
 
     def get_health_message(self) -> str:
-        uptime_seconds = int(time.monotonic() - self._started_at)
-        uptime_hours, remainder = divmod(uptime_seconds, 3600)
-        uptime_minutes, uptime_seconds = divmod(remainder, 60)
-        uptime = f"{uptime_hours}h {uptime_minutes}m {uptime_seconds}s"
-
-        allowed = "any chat" if not self.config.allowed_chat_ids else f"{len(self.config.allowed_chat_ids)} allowed chats"
-        decorator_state = "enabled" if self._is_decorated_output_enabled() else "disabled"
-        input_llm_state = "enabled" if self._resolve_llm_runtime("input") else "disabled"
-        model = self._stats.get("last_model") or self.config.opencode_model or "default"
-        last_error = self._stats.get("last_error") or "none"
-
-        lines = [
-            "*Health*",
-            f"Status: running",
-            f"Uptime: {_escape_markdown_v2(uptime)}",
-            f"OpenCode model: {_escape_markdown_v2(str(model))}",
-            f"OpenCode API: {_escape_markdown_v2(self.config.opencode_api_base_url)}",
-            f"Active sessions: {len(self._chat_sessions)}",
-            f"Input LLM rewrite: {_escape_markdown_v2(input_llm_state)}",
-            f"Output decoration: {_escape_markdown_v2(decorator_state)}",
-            f"Chat access: {_escape_markdown_v2(allowed)}",
-            f"Last result: {_escape_markdown_v2(str(self._stats.get('last_result_kind') or 'none'))}",
-            f"Last error: {_escape_markdown_v2(str(last_error))}",
-        ]
-        return "\n".join(lines)
+        context = BridgePresentationContext(
+            stats=self._stats,
+            started_at=self._started_at,
+            chat_sessions_count=len(self._chat_sessions),
+            pending_workflow_drafts_count=len(self._pending_workflow_drafts),
+            allowed_chat_ids_count=len(self.config.allowed_chat_ids),
+            opencode_api_base_url=self.config.opencode_api_base_url,
+            opencode_model=self.config.opencode_model,
+            workflow_stats_provider=self._workflow_stats_provider,
+            is_decorated_output_enabled=self._is_decorated_output_enabled,
+            is_input_llm_enabled=lambda: bool(self._resolve_llm_runtime("input")),
+        )
+        return format_health_message(context)
 
     def get_stats_message(self) -> str:
-        uptime_seconds = int(time.monotonic() - self._started_at)
-        uptime_hours, remainder = divmod(uptime_seconds, 3600)
-        uptime_minutes, uptime_seconds = divmod(remainder, 60)
-        uptime = f"{uptime_hours}h {uptime_minutes}m {uptime_seconds}s"
-
-        lines = [
-            "*Stats*",
-            f"Requests: {self._stats['requests']}",
-            f"Successful: {self._stats['successful_requests']}",
-            f"Failed: {self._stats['failed_requests']}",
-            f"Prompt rewrites: {self._stats['prompt_rewrites']}",
-            f"Input LLM failures: {self._stats['input_llm_failures']}",
-            f"Decorated outputs: {self._stats['decorated_outputs']}",
-            f"Decorator failures: {self._stats['decorator_failures']}",
-            f"Last model: {_escape_markdown_v2(str(self._stats.get('last_model') or 'none'))}",
-            f"Uptime: {_escape_markdown_v2(uptime)}",
-            f"Pending workflow drafts: {len(self._pending_workflow_drafts)}",
-        ]
-        if self._workflow_stats_provider is not None:
-            try:
-                workflow_lines = self._workflow_stats_provider()
-            except (RuntimeError, ValueError, TypeError) as exc:
-                logger.warning("Workflow stats provider failed: %s", exc)
-                workflow_lines = [f"Workflows stats error: {exc}"]
-            except Exception as exc:
-                # Top-level guard: unexpected errors should not crash stats reporting
-                logger.error("Unexpected error in workflow stats provider: %s", exc)
-                workflow_lines = ["Workflows stats unavailable"]
-            if workflow_lines:
-                lines.append("")
-                lines.append("*Workflows*")
-                lines.extend(_escape_markdown_v2(str(item)) for item in workflow_lines)
-        return "\n".join(lines)
+        context = BridgePresentationContext(
+            stats=self._stats,
+            started_at=self._started_at,
+            chat_sessions_count=len(self._chat_sessions),
+            pending_workflow_drafts_count=len(self._pending_workflow_drafts),
+            allowed_chat_ids_count=len(self.config.allowed_chat_ids),
+            opencode_api_base_url=self.config.opencode_api_base_url,
+            opencode_model=self.config.opencode_model,
+            workflow_stats_provider=self._workflow_stats_provider,
+            is_decorated_output_enabled=self._is_decorated_output_enabled,
+            is_input_llm_enabled=lambda: bool(self._resolve_llm_runtime("input")),
+        )
+        return format_stats_message(context)
 
     @staticmethod
     def _slugify_workflow_id(value: str) -> str:
-        slug = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
-        return slug or "workflow"
+        return slugify_workflow_id(value)
 
     @staticmethod
     def _extract_json_object_text(text: str) -> Optional[str]:
-        try:
-            candidate = text.strip()
-            if candidate.startswith("```"):
-                first_newline = candidate.find("\n")
-                if first_newline != -1:
-                    candidate = candidate[first_newline + 1 :]
-                if candidate.endswith("```"):
-                    candidate = candidate[:-3]
-                candidate = candidate.strip()
-
-            start = candidate.find("{")
-            if start == -1:
-                return None
-
-            depth = 0
-            in_string = False
-            escaped = False
-            for index in range(start, len(candidate)):
-                ch = candidate[index]
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif ch == "\\":
-                        escaped = True
-                    elif ch == '"':
-                        in_string = False
-                    continue
-
-                if ch == '"':
-                    in_string = True
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return candidate[start : index + 1]
-            return None
-        except (AttributeError, IndexError, TypeError) as exc:
-            logger.debug("JSON object extraction failed: %s", exc)
-            return None
+        return extract_json_object_text(text)
 
     @staticmethod
     def _coerce_single_workflow(payload: object) -> dict:
-        if isinstance(payload, dict):
-            if isinstance(payload.get("workflows"), list) and payload["workflows"]:
-                first = payload["workflows"][0]
-                if isinstance(first, dict):
-                    return dict(first)
-            return dict(payload)
-        raise ValueError("Workflow draft must be a JSON object")
+        return coerce_single_workflow(payload)
 
     @staticmethod
     def _workflow_file_path() -> Path:
-        from .workflows import DEFAULT_WORKFLOWS_FILE
-
-        return DEFAULT_WORKFLOWS_FILE
+        return workflow_file_path()
 
     async def _draft_workflow_from_instruction(
         self,
@@ -1132,389 +870,33 @@ class OpenCodeBridge:
         instruction: str,
         existing_draft: Optional[dict] = None,
     ) -> dict:
-        from .workflows import WorkflowDefinition, WorkflowState, _next_run_timestamp
-
-        existing_text = ""
-        if existing_draft is not None:
-            existing_text = "\n\nExisting workflow draft JSON:\n" + json.dumps(existing_draft, indent=2)
-
-        authoring_prompt = (
-            "Convert the user's natural-language request into ONE workflow JSON object for OpenBridge. "
-            "Return JSON only with no markdown fences and no commentary.\n\n"
-            "Required top-level fields:\n"
-            "- id (snake_case)\n"
-            "- name\n"
-            "- enabled (boolean)\n"
-            "- timezone (\"local\" or \"UTC\")\n"
-            "- schedule (daily@HH:MM OR every:<seconds> OR cron:<5 fields>)\n"
-            "- targets (array of numeric chat ids)\n"
-            "- steps (array)\n\n"
-            "Allowed step types: http_fetch, transform_python, opencode_prompt, telegram_send.\n"
-            "For news workflows, use http_fetch normalize=\"rss_digest\" and include max_items.\n"
-            "For Gmail/Calendar/Drive-style workflows in this phase, do NOT use mcp_tool_call. "
-            "Instead, use opencode_prompt and instruct OpenCode to call MCP tools internally.\n"
-            "When the user mentions a specific MCP profile like gws-arindam or gws-kiit, embed that profile name "
-            "clearly in the opencode_prompt instructions.\n"
-            "Always include telegram_send as the final step.\n"
-            "Use chat target "
-            f"{chat_id} if target is unspecified.\n"
-            "Keep prompt_template concise and practical.\n"
-            "Example Gmail digest workflow shape for this phase:\n"
-            "{\n"
-            "  \"id\": \"personal_gmail_digest\",\n"
-            "  \"name\": \"Personal Gmail Digest\",\n"
-            "  \"enabled\": true,\n"
-            "  \"timezone\": \"local\",\n"
-            "  \"schedule\": \"cron:0 9 * * *\",\n"
-            "  \"targets\": [CHAT_ID],\n"
-            "  \"steps\": [\n"
-            "    {\n"
-            "      \"type\": \"opencode_prompt\",\n"
-            "      \"prompt_template\": \"Using MCP server gws-arindam, fetch top 10 important emails from the last day and create a concise digest with sender, subject, and why it matters.\"\n"
-            "    },\n"
-            "    {\"type\": \"telegram_send\"}\n"
-            "  ]\n"
-            "}\n"
-            f"\nUser request:\n{instruction}{existing_text}"
+        return await draft_workflow_from_instruction(
+            self,
+            chat_id=chat_id,
+            instruction=instruction,
+            existing_draft=existing_draft,
         )
-
-        authoring_chat_id = -2_000_000_000 - abs(chat_id)
-        draft_text = await self.run_prompt(authoring_chat_id, authoring_prompt)
-        if self._is_error_result(draft_text):
-            raise ValueError(draft_text)
-
-        json_text = self._extract_json_object_text(draft_text)
-        if not json_text:
-            raise ValueError("Could not extract workflow JSON from model output")
-
-        parsed = json.loads(json_text)
-        workflow_obj = self._coerce_single_workflow(parsed)
-
-        safety_errors = self._validate_workflow_safety(workflow_obj, chat_id)
-        if safety_errors:
-            raise ValueError("Workflow safety validation failed: " + "; ".join(safety_errors))
-
-        if not workflow_obj.get("name"):
-            workflow_obj["name"] = "Telegram Workflow"
-        if not workflow_obj.get("id"):
-            workflow_obj["id"] = self._slugify_workflow_id(str(workflow_obj.get("name", "workflow")))
-        if "enabled" not in workflow_obj:
-            workflow_obj["enabled"] = True
-        if not workflow_obj.get("timezone"):
-            workflow_obj["timezone"] = "local"
-        if not workflow_obj.get("targets"):
-            workflow_obj["targets"] = [chat_id]
-
-        validated = WorkflowDefinition.from_mapping(workflow_obj)
-        _ = _next_run_timestamp(validated, WorkflowState(), time.time())
-
-        return {
-            "id": validated.id,
-            "name": validated.name,
-            "enabled": validated.enabled,
-            "timezone": validated.timezone,
-            "schedule": validated.schedule,
-            "targets": validated.targets,
-            "steps": [{"type": step.type, **step.params} for step in validated.steps],
-            "retry_policy": validated.retry_policy,
-            "dedupe_policy": validated.dedupe_policy,
-            "metadata": validated.metadata,
-        }
 
     @staticmethod
     def _validate_workflow_safety(workflow_obj: dict, chat_id: int) -> List[str]:
-        errors: List[str] = []
-
-        steps = workflow_obj.get("steps", [])
-        if not isinstance(steps, list) or not steps:
-            errors.append("workflow must contain at least one step")
-            return errors
-
-        if len(steps) > 10:
-            errors.append("workflow cannot contain more than 10 steps")
-
-        allowed_types = {"http_fetch", "transform_python", "opencode_prompt", "telegram_send"}
-        for index, step in enumerate(steps, start=1):
-            if not isinstance(step, dict):
-                errors.append(f"step {index} must be an object")
-                continue
-
-            step_type = str(step.get("type", "")).strip().lower()
-            if step_type not in allowed_types:
-                errors.append(f"step {index} has unsupported type '{step_type}'")
-                continue
-
-            if step_type == "http_fetch":
-                sources = step.get("sources", [])
-                if not isinstance(sources, list) or not sources:
-                    errors.append(f"step {index} must include a non-empty sources list")
-                elif len(sources) > 5:
-                    errors.append(f"step {index} cannot fetch more than 5 sources")
-
-            if step_type == "opencode_prompt":
-                prompt_template = str(step.get("prompt_template") or step.get("prompt") or "")
-                if len(prompt_template) > 5000:
-                    errors.append(f"step {index} prompt template is too large")
-
-            if step_type == "telegram_send":
-                targets = step.get("targets")
-                if targets is not None and not isinstance(targets, list):
-                    errors.append(f"step {index} targets must be a list if provided")
-
-        targets = workflow_obj.get("targets", [])
-        if not isinstance(targets, list) or not targets:
-            errors.append("workflow must target at least one chat")
-        else:
-            for target in targets:
-                try:
-                    target_id = int(target)
-                except (TypeError, ValueError):
-                    errors.append(f"invalid target chat id: {target}")
-                    continue
-                if target_id != chat_id:
-                    errors.append("workflows created from chat must target the requesting chat only")
-                    break
-
-        schedule = str(workflow_obj.get("schedule", "")).strip()
-        if not schedule:
-            errors.append("workflow schedule is missing")
-
-        return errors
+        return validate_workflow_safety(workflow_obj, chat_id)
 
     def _format_workflow_preview(self, workflow_def: dict) -> str:
-        from .workflows import WorkflowDefinition, WorkflowState, _format_timestamp, _next_run_timestamp
-
-        validated = WorkflowDefinition.from_mapping(workflow_def)
-        next_run = _next_run_timestamp(validated, WorkflowState(), time.time())
-        step_names = [step.type for step in validated.steps]
-        return (
-            "Workflow draft ready:\n"
-            f"- id: {validated.id}\n"
-            f"- name: {validated.name}\n"
-            f"- schedule: {validated.schedule}\n"
-            f"- timezone: {validated.timezone}\n"
-            f"- targets: {validated.targets}\n"
-            f"- steps: {step_names}\n"
-            f"- next run: {_format_timestamp(next_run)}\n\n"
-            "Reply with one of:\n"
-            "- YES (save)\n"
-            "- RUN (save and run now)\n"
-            "- EDIT <changes> (revise draft)\n"
-            "- CANCEL (discard)"
-        )
+        return format_workflow_preview(workflow_def)
 
     async def _save_workflow_definition(self, workflow_def: dict) -> tuple[Path, bool]:
-        from .workflows import save_workflows
-
-        workflows_file = self._workflow_file_path()
-        async with self._workflow_file_lock:
-            existing_items: List[dict] = []
-            if workflows_file.exists():
-                try:
-                    raw = json.loads(workflows_file.read_text(encoding="utf-8"))
-                    if isinstance(raw, dict) and isinstance(raw.get("workflows"), list):
-                        existing_items = [item for item in raw["workflows"] if isinstance(item, dict)]
-                    elif isinstance(raw, list):
-                        existing_items = [item for item in raw if isinstance(item, dict)]
-                except json.JSONDecodeError:
-                    existing_items = []
-
-            replaced = False
-            merged: List[dict] = []
-            for item in existing_items:
-                if str(item.get("id", "")).strip() == str(workflow_def.get("id", "")).strip():
-                    merged.append(dict(workflow_def))
-                    replaced = True
-                else:
-                    merged.append(item)
-            if not replaced:
-                merged.append(dict(workflow_def))
-
-            save_workflows(workflows_file, {"workflows": merged})
-            return workflows_file, replaced
+        return await save_workflow_definition(self, workflow_def)
 
     async def _run_workflow_now(self, workflow_id: str, app: Application) -> str:
-        if self._workflow_manager is None:
-            return "Workflow saved, but no active workflow manager was attached."
-
-        result = await self._workflow_manager.run_workflow(workflow_id, telegram_bot=app.bot, manual=True)
-        if result.status == "success":
-            return f"Workflow {workflow_id} executed successfully in {result.duration_seconds:.2f}s."
-        if result.status == "skipped":
-            return f"Workflow {workflow_id} skipped: {result.skipped_reason}"
-        logger.error("Workflow %s failed: %s", workflow_id, result.error)
-        return f"Workflow {workflow_id} failed. Check logs for details."
+        return await run_workflow_now(self, workflow_id, app)
 
     async def _handle_pending_workflow_reply(self, chat_id: int, prompt: str, app: Any) -> Optional[str]:
-        pending = self._pending_workflow_drafts.get(chat_id)
-        if not pending:
-            return None
-
-        raw = prompt.strip()
-        decision = raw.upper()
-        if decision == "CANCEL":
-            self._pending_workflow_drafts.pop(chat_id, None)
-            return "Workflow draft discarded."
-
-        if decision == "YES" or decision == "RUN":
-            workflow_def = pending["workflow"]
-            workflows_file, replaced = await self._save_workflow_definition(workflow_def)
-            self._pending_workflow_drafts.pop(chat_id, None)
-            action_text = "updated" if replaced else "saved"
-            message = f"Workflow {workflow_def['id']} {action_text} in {workflows_file}."
-            if decision == "RUN":
-                run_message = await self._run_workflow_now(str(workflow_def["id"]), app)
-                return f"{message}\n{run_message}"
-            return message
-
-        if decision.startswith("EDIT"):
-            delta = raw[4:].strip()
-            if not delta:
-                return "Use EDIT <changes> to revise the draft, for example: EDIT run at 07:30 and use 8 items."
-
-            revised = await self._draft_workflow_from_instruction(
-                chat_id=chat_id,
-                instruction=delta,
-                existing_draft=pending["workflow"],
-            )
-            pending["workflow"] = revised
-            return self._format_workflow_preview(revised)
-
-        return "You have a pending workflow draft. Reply with YES, RUN, EDIT <changes>, or CANCEL."
+        return await handle_pending_workflow_reply(self, chat_id, prompt, app)
 
     async def handle_workflow_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            if not update.effective_message or not update.effective_chat:
-                logger.warning("handle_workflow_command called with missing message or chat")
-                return
+        from .workflow_management import handle_workflow_command
 
-            chat_id = update.effective_chat.id
-            if not self._is_chat_allowed(chat_id):
-                try:
-                    await update.effective_message.reply_text("This chat is not allowed to manage workflows.")
-                except Exception as reply_exc:
-                    logger.error("Failed to send workflow access denial to chat %s: %s", chat_id, reply_exc)
-                return
-
-            args = list(context.args or [])
-            if not args:
-                try:
-                    await update.effective_message.reply_text(
-                        "Workflow commands:\n"
-                        "/workflow create <natural language request>\n"
-                        "/workflow list\n"
-                        "/workflow status <id>\n"
-                        "/workflow pause <id>\n"
-                        "/workflow resume <id>\n"
-                        "/workflow run <id>"
-                    )
-                except Exception as reply_exc:
-                    logger.error("Failed to send workflow help to chat %s: %s", chat_id, reply_exc)
-                return
-
-            action = args[0].strip().lower()
-            if action == "create":
-                instruction = " ".join(args[1:]).strip()
-                if not instruction:
-                    try:
-                        await update.effective_message.reply_text("Usage: /workflow create <natural language request>")
-                    except Exception as reply_exc:
-                        logger.error("Failed to send usage message to chat %s: %s", chat_id, reply_exc)
-                    return
-                try:
-                    draft = await self._draft_workflow_from_instruction(chat_id=chat_id, instruction=instruction)
-                except Exception as exc:
-                    logger.exception("Workflow draft generation failed for chat %s", chat_id)
-                    try:
-                        await update.effective_message.reply_text("Could not draft workflow. Check logs for details.")
-                    except Exception as reply_exc:
-                        logger.error("Failed to send workflow draft error to chat %s: %s", chat_id, reply_exc)
-                    return
-
-                try:
-                    self._pending_workflow_drafts[chat_id] = {"workflow": draft, "source": instruction}
-                    await update.effective_message.reply_text(self._format_workflow_preview(draft))
-                except Exception as exc:
-                    logger.exception("Error handling workflow draft for chat %s", chat_id)
-                    try:
-                        await update.effective_message.reply_text("Failed to process workflow draft. Check logs.")
-                    except Exception as reply_exc:
-                        logger.error("Failed to notify workflow draft error to chat %s: %s", chat_id, reply_exc)
-                return
-
-            if action == "list":
-                if self._workflow_manager is not None:
-                    await update.effective_message.reply_text(self._workflow_manager.summary_text())
-                    return
-
-                from .workflows import load_workflows
-
-                workflows = load_workflows(self._workflow_file_path())
-                if not workflows:
-                    await update.effective_message.reply_text("No workflows configured.")
-                    return
-                items = [f"- {item.id}: {item.name} ({item.schedule})" for item in workflows]
-                await update.effective_message.reply_text("Configured workflows:\n" + "\n".join(items))
-                return
-
-            if len(args) < 2:
-                await update.effective_message.reply_text("This action requires a workflow id.")
-                return
-
-            workflow_id = args[1].strip()
-            if action == "status":
-                if self._workflow_manager is None:
-                    await update.effective_message.reply_text("Workflow manager is not attached.")
-                    return
-                try:
-                    text = self._workflow_manager.status_text(workflow_id)
-                except Exception:
-                    logger.exception("Failed to fetch workflow status for %s", workflow_id)
-                    await update.effective_message.reply_text("Could not fetch workflow status. Check logs for details.")
-                    return
-                await update.effective_message.reply_text(text)
-                return
-
-            if action == "pause":
-                if self._workflow_manager is None:
-                    await update.effective_message.reply_text("Workflow manager is not attached.")
-                    return
-                try:
-                    self._workflow_manager.set_paused(workflow_id, True)
-                except Exception:
-                    logger.exception("Failed to pause workflow %s", workflow_id)
-                    await update.effective_message.reply_text("Could not pause workflow. Check logs for details.")
-                    return
-                await update.effective_message.reply_text(f"Paused workflow: {workflow_id}")
-                return
-
-            if action == "resume":
-                if self._workflow_manager is None:
-                    await update.effective_message.reply_text("Workflow manager is not attached.")
-                    return
-                try:
-                    self._workflow_manager.set_paused(workflow_id, False)
-                except Exception:
-                    logger.exception("Failed to resume workflow %s", workflow_id)
-                    await update.effective_message.reply_text("Could not resume workflow. Check logs for details.")
-                    return
-                await update.effective_message.reply_text(f"Resumed workflow: {workflow_id}")
-                return
-
-            if action == "run":
-                message = await self._run_workflow_now(workflow_id, context.application)
-                await update.effective_message.reply_text(message)
-                return
-
-            await update.effective_message.reply_text(f"Unknown workflow action: {action}")
-
-        except Exception:
-            logger.exception("Unexpected error in handle_workflow_command")
-            if update.effective_message:
-                try:
-                    await update.effective_message.reply_text("Workflow command error. Check logs for details.")
-                except Exception as notify_exc:
-                    logger.error("Failed to notify workflow command error: %s", notify_exc)
+        await handle_workflow_command(self, update, context)
 
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
@@ -1674,39 +1056,7 @@ class OpenCodeBridge:
                     self._chat_queues.pop(chat_id, None)
 
     async def _send_result_messages(self, chat_id: int, result: str, app: Application) -> None:
-        try:
-            decorated_chunks = await self.decorate_output(result)
-            if decorated_chunks:
-                for chunk in decorated_chunks:
-                    try:
-                        await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="MarkdownV2")
-                    except Exception as send_exc:
-                        logger.error("Failed to send decorated message to chat %s: %s", chat_id, send_exc)
-                        try:
-                            await app.bot.send_message(chat_id=chat_id, text="(decorated output could not be sent)")
-                        except Exception as fallback_exc:
-                            logger.error("Fallback message send also failed for chat %s: %s", chat_id, fallback_exc)
-                return
-
-            for chunk in _chunk_message(result):
-                if len(chunk) > TELEGRAM_LIMIT:
-                    chunk = chunk[:TELEGRAM_LIMIT]
-                try:
-                    escaped_chunk = _escape_markdown_v2(chunk, preserve_formatting=True)
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=escaped_chunk,
-                        parse_mode="MarkdownV2",
-                    )
-                except Exception as send_exc:
-                    logger.error("Failed to send message chunk to chat %s (len=%d): %s", chat_id, len(chunk), send_exc)
-                    raise
-        except Exception as exc:
-            logger.exception("Error sending result messages to chat %s", chat_id)
-            try:
-                await app.bot.send_message(chat_id=chat_id, text="Failed to deliver OpenCode response. Check logs for details.")
-            except Exception as notify_exc:
-                logger.error("Could not notify user of delivery failure: %s", notify_exc)
+        await send_result_messages(chat_id, result, app, self.decorate_output)
 
 
 

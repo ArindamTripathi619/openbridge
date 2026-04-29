@@ -17,8 +17,37 @@ This document describes the OpenBridge architecture, module responsibilities, an
 **Boundaries**: 
 - Does NOT directly call OpenCode API (delegates to `OpenCodeAPIClient`)
 - Does NOT implement LLM logic (delegates to `LLMService`)
-- Does NOT handle message rendering internals (uses helper functions)
+- Does NOT handle message rendering internals (delegates to `bridge_presentation.py`)
+- Does NOT own workflow authoring/execution internals (delegates to `workflow_management.py`)
 - Focuses on: dispatch, error recovery, session tracking, stats
+
+#### bridge_presentation.py
+**Responsibility**: Telegram-facing rendering, chunking, redaction, and delivery helpers.
+
+**Public API**:
+- `format_health_message(context)` - Render `/health`
+- `format_stats_message(context)` - Render `/stats`
+- `render_decorated_messages(payload)` - Format LLM decoration payloads
+- `send_result_messages(chat_id, result, app, decorate_output)` - Deliver responses safely
+
+**Boundaries**:
+- Does NOT talk to OpenCode directly
+- Does NOT manage workflow state
+- Does NOT own Telegram dispatch logic
+
+#### workflow_management.py
+**Responsibility**: Workflow drafting, validation, persistence, execution, and command handling.
+
+**Public API**:
+- `draft_workflow_from_instruction(bridge, chat_id, instruction, existing_draft=None)` - Draft workflow JSON
+- `save_workflow_definition(bridge, workflow_def)` - Persist workflow definitions
+- `handle_workflow_command(bridge, update, context)` - Process `/workflow` commands
+- `handle_pending_workflow_reply(bridge, chat_id, prompt, app)` - Handle draft replies
+
+**Boundaries**:
+- Does NOT own Telegram application setup
+- Does NOT perform OpenCode transport calls directly
+- Does NOT format general chat output
 
 #### OpenCodeAPIClient (opencode_api_client.py)
 **Responsibility**: All OpenCode API interactions.
@@ -58,8 +87,8 @@ Telegram API
 OpenCodeBridge (orchestrator)
      ├─→ OpenCodeAPIClient (stateless)
      ├─→ LLMService (stateless, config-injected)
-     ├─→ Workflow (internal)
-     ├─→ Message rendering (utilities)
+   ├─→ workflow_management.py (workflow orchestration)
+   ├─→ bridge_presentation.py (rendering / delivery helpers)
      └─→ Config (BridgeConfig)
 ```
 
@@ -74,7 +103,7 @@ OpenCodeBridge (orchestrator)
 → Extend `OpenCodeAPIClient`
 
 #### Adding a new Telegram command or adjustment to message dispatch?
-→ Extend `OpenCodeBridge`, keep specific logic delegated to services
+→ Extend `OpenCodeBridge`, keep specific logic delegated to `bridge_presentation.py` or `workflow_management.py`
 
 #### Changing polling backoff behavior?
 → Modify `OpenCodeAPIClient.run_prompt_with_polling()` and config knobs
@@ -107,16 +136,15 @@ Before merging changes, verify:
    - [ ] Service methods testable in isolation
    - [ ] No tight coupling to Telegram or OpenCode in service tests
 
-### Phase 2 Modularization (Future)
+### Phase 2 Modularization (Complete)
 
-When ready, Phase 2 will:
-1. Extract rendering module (message formatting, chunking)
-2. Extract workflow module (authoring, scheduling, execution)
-3. Extract stats/telemetry module
-4. Integrate new modules into OpenCodeBridge as clean composition root
-5. Remove redundant code from main bridge class
+Phase 2 has been implemented:
+1. Rendering, chunking, and redaction now live in `bridge_presentation.py`
+2. Workflow drafting, persistence, execution, and command handling now live in `workflow_management.py`
+3. `OpenCodeBridge` now acts as a thin composition root with compatibility wrappers
+4. The bridge class no longer owns the extracted presentation or workflow internals
 
-Expected outcome: OpenCodeBridge reduces from 1700+ LOC to <600 LOC focused on orchestration.
+Current outcome: OpenCodeBridge is focused on orchestration, while the extracted modules own the specialized logic.
 
 ### References
 
