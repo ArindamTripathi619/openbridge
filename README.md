@@ -58,7 +58,7 @@ Telegram → OpenBridge (dispatcher) → OpenCodeAPIClient (session/polling)
                               ↓
                          LLMService (enhancement/decoration)
                               ↓
-                         Message formatting & chunking
+          bridge_presentation.py (rendering/delivery)
                               ↓
                          Telegram
 ```
@@ -129,8 +129,9 @@ flowchart TD
   T --> U[POST prompt to OpenCode API session]
   U --> V[Poll session messages for result]
   V --> W[Optional output LLM formatting]
-  W --> X[Chunk response for Telegram]
-  X --> Y[Send response to chat]
+  W --> X[bridge_presentation.py render/decorate]
+  X --> Y[Chunk response for Telegram]
+  Y --> Z[Send response to chat]
 ```
 
 ## Message Execution Sequence
@@ -141,8 +142,10 @@ sequenceDiagram
   actor User as Telegram User
   participant TG as Telegram Bot
   participant Bridge as OpenBridge Bridge
+  participant LLM as LLMService
   participant Sessions as In-Memory Chat Session Map
-  participant OC as OpenCode API
+  participant OC as OpenCode API Client
+  participant Presentation as bridge_presentation.py
 
   User->>TG: Send message
   TG->>Bridge: Deliver update
@@ -151,22 +154,25 @@ sequenceDiagram
     Bridge-->>TG: Reject message
     TG-->>User: Access denied
   else Chat allowed
-    Bridge->>Bridge: Optional input LLM rewrite
+    Bridge->>LLM: Optional input prompt enhancement
+    LLM-->>Bridge: Enhanced prompt
     Bridge->>Sessions: Lookup session by chat id
     alt Session exists
       Sessions-->>Bridge: Existing session id
     else Session missing
-      Bridge->>OC: POST /session
+      Bridge->>OC: Create session
       OC-->>Bridge: New session id
       Bridge->>Sessions: Store chat id -> session id
     end
-    Bridge->>OC: POST /session/{id}/message
+    Bridge->>OC: Send prompt to session
     loop Poll until new assistant output or timeout
-      Bridge->>OC: GET /session/{id}/message
+      Bridge->>OC: Poll session messages
       OC-->>Bridge: Session messages
     end
-    Bridge->>Bridge: Optional output LLM formatting
-    Bridge->>Bridge: Chunk for Telegram limits
+    Bridge->>LLM: Optional output decoration
+    LLM-->>Bridge: Decorated result payload
+    Bridge->>Presentation: Render, redact, chunk, and format
+    Presentation-->>Bridge: Telegram-safe response chunks
     Bridge-->>TG: Send reply chunks
     TG-->>User: Receive response
   end
@@ -247,12 +253,12 @@ If you do not want to clone this repository, you can install OpenBridge directly
 
 Release page:
 
-- [OpenBridge v1.0.1 release](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/tag/v1.0.1)
+- [OpenBridge v1.1.0 release](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/tag/v1.1.0)
 
 Direct artifact links:
 
-- [openbridge-1.0.1-py3-none-any.whl](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.1/openbridge-1.0.1-py3-none-any.whl)
-- [openbridge-1.0.1.tar.gz](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.0.1/openbridge-1.0.1.tar.gz)
+- [openbridge-1.1.0-py3-none-any.whl](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.1.0/openbridge-1.1.0-py3-none-any.whl)
+- [openbridge-1.1.0.tar.gz](https://github.com/ArindamTripathi619/TelegramRemoteProgressBot/releases/download/v1.1.0/openbridge-1.1.0.tar.gz)
 
 Prerequisites:
 
@@ -266,14 +272,14 @@ Install using wheel (recommended):
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install ./openbridge-1.0.1-py3-none-any.whl
+python -m pip install ./openbridge-1.1.0-py3-none-any.whl
 ```
 
 Install using source tarball:
 
 ```bash
-tar -xzf openbridge-1.0.1.tar.gz
-cd openbridge-1.0.1
+tar -xzf openbridge-1.1.0.tar.gz
+cd openbridge-1.1.0
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip

@@ -8,7 +8,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="openbridge",
-    version="1.0.1",
+    version="1.1.0",
     author="DevCrewX",
     license="MIT",
     description="Telegram to OpenCode API relay bot",

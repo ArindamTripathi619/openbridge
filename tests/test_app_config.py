@@ -327,7 +327,7 @@ class TestAppConfig(unittest.TestCase):
             parser.parse_args(["--version"])
 
         self.assertEqual(exc.exception.code, 0)
-        self.assertIn("openbridge 1.0.1", buffer.getvalue())
+        self.assertIn("openbridge 1.1.0", buffer.getvalue())
 
     def test_parser_includes_render_systemd_command(self):
         parser = build_parser()
