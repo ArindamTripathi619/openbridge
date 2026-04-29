@@ -29,6 +29,9 @@ from telegram.constants import ChatAction
 from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from openbridge.llm_service import LLMService
+from openbridge.opencode_api_client import OpenCodeAPIClient
+
 logger = logging.getLogger("opencode_bridge")
 
 TELEGRAM_LIMIT = 4096
@@ -669,6 +672,20 @@ class OpenCodeBridge:
         self._chat_queues: dict[int, asyncio.Queue[tuple[str, Application]]] = {}
         self._chat_workers: dict[int, asyncio.Task[Any]] = {}
 
+        # Initialize service instances
+        self._api_client = OpenCodeAPIClient(
+            api_base_url=config.opencode_api_base_url,
+            api_username=config.opencode_api_username,
+            api_password=config.opencode_api_password,
+            api_timeout_seconds=config.opencode_api_timeout_seconds,
+            backoff_base_ms=config.opencode_backoff_base_ms,
+            backoff_max_ms=config.opencode_backoff_max_ms,
+            backoff_factor=config.opencode_backoff_factor,
+            backoff_jitter_pct=config.opencode_backoff_jitter_pct,
+        )
+
+        self._llm_service = LLMService(resolve_runtime=self._resolve_llm_runtime)
+
     async def close(self) -> None:
         async with self._chat_queue_lock:
             workers = list(self._chat_workers.values())
@@ -749,55 +766,10 @@ class OpenCodeBridge:
         return session_id
 
     def _run_prompt_via_api_sync(self, session_id: str, prompt: str) -> str:
-        started_at = time.time()
-        logger.debug("OpenCode request start: session=%s prompt_len=%d", session_id, len(prompt))
-        before_messages = self._fetch_session_messages_sync(session_id)
-        before_snapshot = set(_extract_text_candidates(before_messages))
-
-        immediate = self._send_session_message_sync(session_id, prompt)
-        if immediate and immediate not in before_snapshot and immediate.strip() != prompt.strip():
-            elapsed = time.time() - started_at
-            logger.debug("OpenCode immediate response in %.2fs", elapsed)
-            return immediate
-
-        deadline = time.time() + self.config.opencode_timeout_seconds
-        poll_count = 0
-        attempt = 0
-        base_ms = int(getattr(self.config, "opencode_backoff_base_ms", DEFAULT_OPENCODE_BACKOFF_BASE_MS))
-        max_ms = int(getattr(self.config, "opencode_backoff_max_ms", DEFAULT_OPENCODE_BACKOFF_MAX_MS))
-        factor = float(getattr(self.config, "opencode_backoff_factor", DEFAULT_OPENCODE_BACKOFF_FACTOR))
-        jitter_pct = float(getattr(self.config, "opencode_backoff_jitter_pct", DEFAULT_OPENCODE_BACKOFF_JITTER_PCT))
-
-        while time.time() < deadline:
-            # compute adaptive backoff with optional jitter
-            sleep_ms = base_ms * (factor ** attempt)
-            if sleep_ms > max_ms:
-                sleep_ms = max_ms
-            if jitter_pct and jitter_pct > 0.0:
-                jitter_factor = random.uniform(max(0.0, 1.0 - jitter_pct), 1.0 + jitter_pct)
-                sleep_ms = sleep_ms * jitter_factor
-
-            sleep_seconds = max(0.05, float(sleep_ms) / 1000.0)
-            time.sleep(sleep_seconds)
-            poll_count += 1
-            attempt += 1
-            current = self._fetch_session_messages_sync(session_id)
-            candidates = _extract_text_candidates(current)
-            for candidate in reversed(candidates):
-                if candidate not in before_snapshot and candidate.strip() and candidate.strip() != prompt.strip():
-                    elapsed = time.time() - started_at
-                    logger.debug("OpenCode response received in %.2fs after %d polls", elapsed, poll_count)
-                    return candidate
-
-            if poll_count % 10 == 0:
-                elapsed = time.time() - started_at
-                logger.debug("OpenCode still waiting: %.2fs elapsed (%d polls)", elapsed, poll_count)
-
-        elapsed = time.time() - started_at
-        logger.warning("OpenCode response timeout after %.2fs (%d polls)", elapsed, poll_count)
-        return (
-            "OpenCode API timed out waiting for a response. "
-            f"Try a smaller prompt or increase OPENCODE_TIMEOUT_SECONDS (current: {self.config.opencode_timeout_seconds})."
+        return self._api_client.run_prompt_with_polling(
+            session_id,
+            prompt,
+            self.config.opencode_timeout_seconds,
         )
 
     def _send_session_message_sync(self, session_id: str, prompt: str) -> Optional[str]:
@@ -936,38 +908,7 @@ class OpenCodeBridge:
         return rewritten
 
     def _enhance_prompt_sync(self, runtime: dict, raw_prompt: str) -> Optional[str]:
-        try:
-            payload = {
-                "model": runtime["model"],
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You rewrite user requests into high-signal prompts for OpenCode. "
-                            "Preserve intent, constraints, and expected output. "
-                            "Return plain text only, no markdown, no commentary."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": raw_prompt,
-                    },
-                ],
-                "temperature": 0.1,
-            }
-
-            content = self._call_chat_completion(runtime, payload)
-            if not content:
-                return None
-
-            candidate = content.strip()
-            if not candidate:
-                return None
-
-            return candidate[:8000]
-        except (ValueError, TypeError, KeyError) as exc:
-            logger.error("Input LLM prompt construction failed: %s", exc)
-            return None
+        return self._llm_service._enhance_prompt_sync(runtime, raw_prompt)
 
     def _is_error_result(self, text: str) -> bool:
         error_prefixes = (
@@ -988,10 +929,10 @@ class OpenCodeBridge:
         return self._resolve_llm_runtime("output") is not None
 
     async def decorate_output(self, raw_output: str) -> Optional[List[str]]:
-        if not self._is_decorated_output_enabled():
+        if self._is_error_result(raw_output):
             return None
 
-        if self._is_error_result(raw_output):
+        if not self._is_decorated_output_enabled():
             return None
 
         try:
@@ -1017,117 +958,13 @@ class OpenCodeBridge:
         runtime = self._resolve_llm_runtime("output")
         if not runtime:
             return None
-
-        prompt = (
-            "Transform the following OpenCode result into a concise Telegram-friendly JSON object. "
-            "Return JSON only, with exactly these keys: title, summary, highlights, actions, warnings. "
-            "Use short, practical wording. Keep the summary under 600 characters. "
-            "highlights, actions, and warnings must be arrays of strings. "
-            "Do not wrap the JSON in markdown fences.\n\n"
-            f"OpenCode output:\n{raw_output[:12000]}"
-        )
-
-        payload = {
-            "model": runtime["model"],
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You format technical results for Telegram. Return JSON only.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-        }
-
-        content = self._call_chat_completion(runtime, payload)
-        if not content:
-            return None
-
-        return self._parse_decorator_json(content)
+        return self._llm_service._decorate_output_sync(raw_output, runtime)
 
     def _call_chat_completion(self, runtime: dict, payload: dict) -> Optional[str]:
-        try:
-            request = Request(
-                url=f"{str(runtime['base_url']).rstrip('/')}/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {runtime['api_key']}",
-                },
-                method="POST",
-            )
-        except (ValueError, TypeError) as exc:
-            logger.error("LLM request construction failed: %s", exc)
-            return None
-
-        try:
-            with urlopen(request, timeout=int(runtime["timeout_seconds"])) as response:
-                response_body = response.read().decode("utf-8", errors="replace")
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            logger.warning("LLM request failed: %s", exc)
-            return None
-
-        try:
-            response_json = json.loads(response_body)
-        except json.JSONDecodeError as exc:
-            logger.warning("LLM response was not valid JSON: %s", exc)
-            return None
-
-        choices = response_json.get("choices") or []
-        if not choices:
-            return None
-
-        first_choice = choices[0]
-        if not isinstance(first_choice, dict):
-            return None
-
-        message = first_choice.get("message")
-        if not isinstance(message, dict):
-            return None
-
-        return str(message.get("content") or "").strip()
+        return self._llm_service._call_chat_completion(runtime, payload)
 
     def _parse_decorator_json(self, text: str) -> Optional[dict]:
-        try:
-            candidate = text.strip()
-            if candidate.startswith("```"):
-                candidate = candidate.split("\n", 1)[1] if "\n" in candidate else candidate
-                if candidate.endswith("```"):
-                    candidate = candidate[:-3].strip()
-
-            start = candidate.find("{")
-            end = candidate.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                candidate = candidate[start : end + 1]
-
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            logger.debug("Decorator JSON parsing failed: %s", exc)
-            return None
-        except (ValueError, TypeError) as exc:
-            logger.debug("Decorator output processing failed: %s", exc)
-            return None
-
-        if not isinstance(parsed, dict):
-            return None
-
-        def as_string_list(value: object) -> List[str]:
-            if not isinstance(value, list):
-                return []
-            items: List[str] = []
-            for item in value:
-                if item is None:
-                    continue
-                items.append(str(item))
-            return items
-
-        return {
-            "title": str(parsed.get("title") or "OpenCode Result"),
-            "summary": str(parsed.get("summary") or ""),
-            "highlights": as_string_list(parsed.get("highlights")),
-            "actions": as_string_list(parsed.get("actions")),
-            "warnings": as_string_list(parsed.get("warnings")),
-        }
+        return self._llm_service._parse_decorator_json(text)
 
     def _render_decorated_messages(self, payload: dict) -> List[str]:
         messages: List[str] = []
