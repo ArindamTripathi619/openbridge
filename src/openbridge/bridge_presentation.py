@@ -181,34 +181,54 @@ def _find_section_split_index(text: str, target: int) -> int:
     return split
 
 
+def _utf16_safe_position(text: str, utf16_limit: int) -> int:
+    count = 0
+    for idx, ch in enumerate(text):
+        count += 2 if ord(ch) >= 0x10000 else 1
+        if count > utf16_limit:
+            return idx
+    return len(text)
+
+
 def _chunk_message(text: str, limit: int = SAFE_CHUNK) -> Iterable[str]:
-    if len(text) <= limit:
+    if _utf16_len(text) <= limit:
         yield text
         return
 
     start = 0
     while start < len(text):
         remaining = text[start:]
-        if len(remaining) <= limit:
+        if _utf16_len(remaining) <= limit:
             yield remaining if remaining.strip() else "(empty)"
             return
 
-        split = _find_section_split_index(remaining, limit)
+        target = _utf16_safe_position(remaining, limit)
+        if target <= 0:
+            target = 1
+
+        split = _find_section_split_index(remaining, target)
         if split <= 0:
-            split = _find_markdown_safe_split_index(remaining, limit)
+            split = _find_markdown_safe_split_index(remaining, target)
         if split <= 0 or split >= len(remaining):
-            split = limit
+            split = target
 
         chunk = remaining[:split]
         yield chunk if chunk.strip() else "(empty)"
         start += split
 
 
+def _utf16_len(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
 def _truncate_text(text: str, limit: int) -> str:
     cleaned = str(text).strip()
-    if len(cleaned) <= limit:
+    if _utf16_len(cleaned) <= limit:
         return cleaned
-    return cleaned[: max(0, limit - 1)].rstrip() + "…"
+    end = limit
+    while end > 0 and _utf16_len(cleaned[:end]) > limit - 1:
+        end -= 1
+    return cleaned[:max(end, 0)].rstrip() + "…"
 
 
 def render_decorated_messages(payload: dict) -> List[str]:

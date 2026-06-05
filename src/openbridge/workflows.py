@@ -897,14 +897,27 @@ class WorkflowManager:
                 await telegram_bot.send_message(chat_id=target, text=chunk)
 
 
+def _utf16_len(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
 def _chunk_text(text: str, limit: int = 3900) -> Iterable[str]:
-    if len(text) <= limit:
+    if _utf16_len(text) <= limit:
         yield text
         return
 
     start = 0
-    while start < len(text):
-        end = min(start + limit, len(text))
+    n = len(text)
+    while start < n:
+        end = start
+        count = 0
+        while end < n:
+            count += 2 if ord(text[end]) >= 0x10000 else 1
+            if count > limit:
+                break
+            end += 1
+        if end <= start:
+            end = start + 1
         yield text[start:end]
         start = end
 
