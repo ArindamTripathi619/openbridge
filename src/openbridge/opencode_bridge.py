@@ -72,6 +72,9 @@ DEFAULT_WORKFLOW_PROMPT_OVERFLOW_MODE = "reject"
 DEFAULT_OPENCODE_BACKOFF_BASE_MS = 250
 DEFAULT_OPENCODE_BACKOFF_MAX_MS = 5000
 SESSION_EXPIRY_SECONDS = 3600
+RATE_LIMIT_TOKENS_PER_CHAT = 5
+RATE_LIMIT_REFILL_INTERVAL_SECONDS = 5
+RATE_LIMIT_BUCKET_CAPACITY = 5
 DEFAULT_MAX_PROMPT_LENGTH = 10000
 DEFAULT_OPENCODE_BACKOFF_FACTOR = 2.0
 DEFAULT_OPENCODE_BACKOFF_JITTER_PCT = 0.2
@@ -509,6 +512,8 @@ class OpenCodeBridge:
         self._chat_sessions: dict[int, str] = {}
         self._session_last_used: dict[int, float] = {}
         self._session_lock = asyncio.Lock()
+        self._rate_limit_buckets: dict[int, tuple[float, float]] = {}
+        self._rate_limit_lock = asyncio.Lock()
         self._workflow_stats_provider: Optional[Callable[[], List[str]]] = None
         self._workflow_manager: Any = None
         self._workflow_file_lock = asyncio.Lock()
@@ -981,6 +986,24 @@ class OpenCodeBridge:
             return False
         return chat_id in self.config.allowed_chat_ids
 
+    async def _check_rate_limit(self, chat_id: int) -> bool:
+        async with self._rate_limit_lock:
+            now = time.monotonic()
+            tokens, last_refill = self._rate_limit_buckets.get(chat_id, (RATE_LIMIT_BUCKET_CAPACITY, now))
+
+            elapsed = now - last_refill
+            added = int(elapsed / RATE_LIMIT_REFILL_INTERVAL_SECONDS)
+            if added > 0:
+                tokens = min(RATE_LIMIT_BUCKET_CAPACITY, tokens + added)
+                last_refill = now
+
+            if tokens < 1:
+                return False
+
+            tokens -= 1
+            self._rate_limit_buckets[chat_id] = (tokens, last_refill)
+            return True
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             if not update.effective_message or not update.effective_chat:
@@ -1037,6 +1060,14 @@ class OpenCodeBridge:
                     except Exception as reply_exc:
                         logger.error("Failed to send workflow draft reply to chat %s: %s", chat_id, reply_exc)
                     return
+
+            if not await self._check_rate_limit(chat_id):
+                logger.warning("Rate limit hit for chat=%s", chat_id)
+                try:
+                    await update.effective_message.reply_text("Too many requests. Please wait before sending another prompt.")
+                except Exception as reply_exc:
+                    logger.error("Failed to send rate limit notification to chat %s: %s", chat_id, reply_exc)
+                return
 
             try:
                 await update.effective_message.reply_text("Request received. Sending to OpenCode API...")
