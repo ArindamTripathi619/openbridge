@@ -143,7 +143,10 @@ OPENCODE_SERVICE_CONFIG_KEYS = [
 
 
 def _read_secret_from_file(path_value: str) -> str:
-    secret_path = Path(path_value).expanduser()
+    raw_path = Path(path_value).expanduser()
+    if raw_path.is_symlink():
+        raise ValueError(f"Secret path must not be a symlink: {raw_path}")
+    secret_path = raw_path.resolve()
     if not secret_path.exists():
         raise FileNotFoundError(f"Secret file does not exist: {secret_path}")
     if not secret_path.is_file():

@@ -913,14 +913,20 @@ class OpenCodeBridge:
         await handle_workflow_command(self, update, context)
 
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_message:
+        if not update.effective_message or not update.effective_chat:
+            return
+        if not self._is_chat_allowed(update.effective_chat.id):
+            await update.effective_message.reply_text("This chat is not allowed to view start.")
             return
         await update.effective_message.reply_text(
             "Send any text prompt. I will run it through OpenCode and reply with the result."
         )
 
     async def handle_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.effective_message:
+        if not update.effective_message or not update.effective_chat:
+            return
+        if not self._is_chat_allowed(update.effective_chat.id):
+            await update.effective_message.reply_text("This chat is not allowed to view help.")
             return
         await update.effective_message.reply_text(
             "Usage:\n"
